@@ -31,11 +31,11 @@ The events emitted by the websocket for `chunk` data are JSON objects with the f
 
 ```json
 {
-  "station": "KTLX",
-  "volume": "",
-  "chunk": "",
-  "chunkType": "",
-  "l2Version": ""
+  "station": "KJAX",
+  "volume": "415",
+  "chunk": "25",
+  "chunkType": "I",
+  "l2Version": "V06"
 }
 ```
 
