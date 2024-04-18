@@ -416,8 +416,11 @@ func (l *Listener) onChunkMessage(msg *sqs.Message) {
 	slog.Info("Received chunk record", "site", site, "volume", volume, "chunk", chunk, "chunkType", chunkType, "l2Version", l2Version)
 
 	l.eventChan <- events.NexradChunkEvent{
-		Station: site,
-		Path:    fmt.Sprintf("%s/%s/%s/%s", site, volume, chunk, l2Version),
+		Station:   site,
+		Volume:    volume,
+		Chunk:     chunk,
+		ChunkType: chunkType,
+		L2Version: l2Version,
 	}
 }
 
