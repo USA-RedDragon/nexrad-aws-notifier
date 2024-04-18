@@ -3,6 +3,7 @@ package sqs
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -320,7 +321,7 @@ func (l *Listener) runArchive() {
 			break
 		}
 		if err != nil {
-			fmt.Println("Error receiving message:", err)
+			slog.Warn("Error receiving message:", "error", err)
 			continue
 		}
 		for _, msg := range resp.Messages {
@@ -330,7 +331,7 @@ func (l *Listener) runArchive() {
 				ReceiptHandle: msg.ReceiptHandle,
 			})
 			if err != nil {
-				fmt.Println("Error deleting message:", err)
+				slog.Warn("Error deleting message:", "error", err)
 			}
 			go l.onArchiveMessage(msg)
 		}
@@ -351,7 +352,7 @@ func (l *Listener) runChunk() {
 			break
 		}
 		if err != nil {
-			fmt.Println("Error receiving message:", err)
+			slog.Warn("Error receiving message:", "error", err)
 			continue
 		}
 		for _, msg := range resp.Messages {
@@ -361,7 +362,7 @@ func (l *Listener) runChunk() {
 				ReceiptHandle: msg.ReceiptHandle,
 			})
 			if err != nil {
-				fmt.Println("Error deleting message:", err)
+				slog.Warn("Error deleting message:", "error", err)
 			}
 			go l.onChunkMessage(msg)
 		}
@@ -372,13 +373,13 @@ func (l *Listener) onArchiveMessage(msg *sqs.Message) {
 	var notification ArchiveNotification
 	err := json.Unmarshal([]byte(*msg.Body), &notification)
 	if err != nil {
-		fmt.Println("Error unmarshalling message:", err)
+		slog.Warn("Error unmarshalling message:", "error", err)
 		return
 	}
 	var message ArchiveNotificationMessage
 	err = json.Unmarshal([]byte(notification.Message), &message)
 	if err != nil {
-		fmt.Println("Error unmarshalling message:", err)
+		slog.Warn("Error unmarshalling message:", "error", err)
 		return
 	}
 
@@ -386,11 +387,11 @@ func (l *Listener) onArchiveMessage(msg *sqs.Message) {
 		// Key is yyyy/mm/dd/STATION/STATION_yyyymmdd_hhmmss_V06
 		parts := strings.Split(record.S3.Object.Key, "/")
 		if len(parts) < 4 {
-			fmt.Println("Invalid key:", record.S3.Object.Key)
+			slog.Warn("Invalid key:", "key", record.S3.Object.Key)
 			continue
 		}
 		station := parts[3]
-		fmt.Printf("Received archive record: station=%s, prefix=%s\n", station, record.S3.Object.Key)
+		slog.Info("Received archive record", "station", station, "prefix", record.S3.Object.Key)
 
 		l.eventChan <- events.NexradArchiveEvent{
 			Station: station,
@@ -403,7 +404,7 @@ func (l *Listener) onChunkMessage(msg *sqs.Message) {
 	var notification ChunkNotification
 	err := json.Unmarshal([]byte(*msg.Body), &notification)
 	if err != nil {
-		fmt.Println("Error unmarshalling message:", err)
+		slog.Warn("Error unmarshalling message:", "error", err)
 		return
 	}
 	site := notification.MessageAttributes["SiteID"].Value
@@ -412,7 +413,7 @@ func (l *Listener) onChunkMessage(msg *sqs.Message) {
 	l2Version := notification.MessageAttributes["L2Version"].Value
 	chunkType := notification.MessageAttributes["ChunkType"].Value
 
-	fmt.Printf("Received chunk record: site=%s, volume=%s, chunk=%s, chunkType=%s, l2Version=%s\n", site, volume, chunk, chunkType, l2Version)
+	slog.Info("Received chunk record", "site", site, "volume", volume, "chunk", chunk, "chunkType", chunkType, "l2Version", l2Version)
 
 	l.eventChan <- events.NexradChunkEvent{
 		Station: site,

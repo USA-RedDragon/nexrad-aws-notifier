@@ -3,7 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
@@ -48,18 +48,18 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 	newCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
 
-	fmt.Println("New websocket connection for", messageType, "at", station)
+	slog.Info("New websocket connection for", "type", messageType, "at", station)
 	switch messageType {
 	case events.EventTypeNexradChunk:
 		err := sqsListener.ListenChunk(station)
 		if err != nil {
-			fmt.Println("Error listening to SQS:", err)
+			slog.Warn("Error listening to SQS:", err)
 			return
 		}
 	case events.EventTypeNexradArchive:
 		err := sqsListener.ListenArchive(station)
 		if err != nil {
-			fmt.Println("Error listening to SQS:", err)
+			slog.Warn("Error listening to SQS:", err)
 			return
 		}
 	}
@@ -82,7 +82,7 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 				case events.EventTypeNexradArchive:
 					archiveEvent, ok := event.(events.NexradArchiveEvent)
 					if !ok {
-						fmt.Println("Error casting event to NexradArchiveEvent")
+						slog.Warn("Error casting event to NexradArchiveEvent")
 						continue
 					}
 					if archiveEvent.Station != station || messageType != events.EventTypeNexradArchive {
@@ -91,7 +91,7 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 				case events.EventTypeNexradChunk:
 					chunkEvent, ok := event.(events.NexradChunkEvent)
 					if !ok {
-						fmt.Println("Error casting event to NexradChunkEvent")
+						slog.Warn("Error casting event to NexradChunkEvent")
 						continue
 					}
 					if chunkEvent.Station != station || messageType != events.EventTypeNexradChunk {
@@ -100,7 +100,7 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 				}
 				eventDataJSON, err := json.Marshal(event)
 				if err != nil {
-					fmt.Println("Error marshalling event data:", err)
+					slog.Warn("Error marshalling event data:", err)
 					continue
 				}
 				w.WriteMessage(websocket.Message{
