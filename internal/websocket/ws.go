@@ -18,7 +18,7 @@ const bufferSize = 1024
 type Websocket interface {
 	OnMessage(ctx context.Context, r *http.Request, w Writer, msg []byte, t int)
 	OnConnect(ctx context.Context, r *http.Request, w Writer, messageType events.EventType, station string, sqsListener *sqs.Listener)
-	OnDisconnect(ctx context.Context, r *http.Request)
+	OnDisconnect(ctx context.Context, r *http.Request, messageType events.EventType, station string, sqsListener *sqs.Listener)
 }
 
 type WSHandler struct {
@@ -70,13 +70,6 @@ func CreateHandler(ws Websocket, config *config.HTTP) func(*gin.Context) {
 		}
 		handler.conn = conn
 
-		defer func() {
-			handler.handler.OnDisconnect(c, c.Request)
-			err := handler.conn.Close()
-			if err != nil {
-				slog.Warn("Failed to close websocket", "error", err)
-			}
-		}()
 		messageType := events.EventType(c.Param("type"))
 		station := c.Param("station")
 		if messageType == "" || station == "" {
@@ -87,6 +80,11 @@ func CreateHandler(ws Websocket, config *config.HTTP) func(*gin.Context) {
 			slog.Error("Failed to get sqsListener")
 			return
 		}
+
+		defer func() {
+			handler.handler.OnDisconnect(c, c.Request, messageType, station, sqsListener)
+			_ = handler.conn.Close()
+		}()
 
 		handler.handle(c.Request.Context(), c.Request, messageType, station, sqsListener)
 	}

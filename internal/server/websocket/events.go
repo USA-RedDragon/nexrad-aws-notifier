@@ -51,13 +51,13 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 	slog.Info("New websocket connection for", "type", messageType, "at", station)
 	switch messageType {
 	case events.EventTypeNexradChunk:
-		err := sqsListener.ListenChunk(station)
+		err := sqsListener.ListenChunk(ctx, station)
 		if err != nil {
 			slog.Warn("Error listening to SQS:", "error", err)
 			return
 		}
 	case events.EventTypeNexradArchive:
-		err := sqsListener.ListenArchive(station)
+		err := sqsListener.ListenArchive(ctx, station)
 		if err != nil {
 			slog.Warn("Error listening to SQS:", "error", err)
 			return
@@ -115,7 +115,22 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 	}()
 }
 
-func (c *EventsWebsocket) OnDisconnect(_ context.Context, _ *http.Request) {
+func (c *EventsWebsocket) OnDisconnect(ctx context.Context, _ *http.Request, messageType events.EventType, station string, sqsListener *sqs.Listener) {
+	slog.Info("Websocket disconnected for", "type", messageType, "at", station)
+	switch messageType {
+	case events.EventTypeNexradChunk:
+		err := sqsListener.UnlistenChunk(ctx, station)
+		if err != nil {
+			slog.Warn("Error stopping SQS listener:", err)
+		}
+	case events.EventTypeNexradArchive:
+		err := sqsListener.UnlistenArchive(ctx, station)
+		if err != nil {
+			slog.Warn("Error stopping SQS listener:", err)
+		}
+	default:
+		slog.Warn("Unknown event type", "type", messageType)
+	}
 	c.connectedCount--
 	c.cancel()
 }

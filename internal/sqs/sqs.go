@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/puzpuzpuz/xsync/v3"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -26,8 +27,8 @@ const (
 
 type Listener struct {
 	eventChan                    chan events.Event
-	archiveSites                 []string
-	chunkSites                   []string
+	archiveSites                 *xsync.MapOf[string, uint]
+	chunkSites                   *xsync.MapOf[string, uint]
 	awsSqs                       *sqs.Client
 	awsSns                       *sns.Client
 	awsSts                       *sts.Client
@@ -121,13 +122,14 @@ func (l *Listener) ensureArchiveSubscription() error {
 	return err
 }
 
-func (l *Listener) updateFilterPolicy() error {
+func (l *Listener) updateFilterPolicy(ctx context.Context) error {
 	var sites []string
-	for _, site := range l.chunkSites {
-		if !slices.Contains(sites, site) {
-			sites = append(sites, site)
+	l.chunkSites.Range(func(key string, val uint) bool {
+		if !slices.Contains(sites, key) && val > 0 {
+			sites = append(sites, key)
 		}
-	}
+		return true
+	})
 
 	if len(sites) == 0 {
 		sites = []string{"nonsense"}
@@ -141,7 +143,7 @@ func (l *Listener) updateFilterPolicy() error {
 		"SiteID": %s
 	}`, jsonSites)
 
-	_, err = l.awsSns.SetSubscriptionAttributes(context.TODO(), &sns.SetSubscriptionAttributesInput{
+	_, err = l.awsSns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
 		SubscriptionArn: aws.String(l.nexradChunkSubscriptionARN),
 		AttributeName:   aws.String("FilterPolicy"),
 		AttributeValue:  aws.String(filterPolicy),
@@ -257,8 +259,8 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 
 	listener := &Listener{
 		eventChan:        eventChan,
-		archiveSites:     []string{},
-		chunkSites:       []string{},
+		archiveSites:     xsync.NewMapOf[string, uint](),
+		chunkSites:       xsync.NewMapOf[string, uint](),
 		awsSqs:           svc,
 		awsSns:           snsSvc,
 		awsSts:           stsSvc,
@@ -299,20 +301,46 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 	return listener, nil
 }
 
-func (l *Listener) ListenChunk(station string) error {
+func (l *Listener) ListenChunk(ctx context.Context, station string) error {
 	station = strings.ToUpper(station)
-	if !slices.Contains(l.chunkSites, station) {
-		l.chunkSites = append(l.chunkSites, station)
+	num, loaded := l.chunkSites.LoadOrStore(station, 1)
+	if loaded {
+		l.chunkSites.Store(station, num+1)
 	}
-	return l.updateFilterPolicy()
+	return l.updateFilterPolicy(ctx)
 }
 
-func (l *Listener) ListenArchive(station string) error {
+func (l *Listener) ListenArchive(ctx context.Context, station string) error {
 	station = strings.ToUpper(station)
-	if !slices.Contains(l.archiveSites, station) {
-		l.archiveSites = append(l.archiveSites, station)
+	num, loaded := l.archiveSites.LoadOrStore(station, 1)
+	if loaded {
+		l.archiveSites.Store(station, num+1)
 	}
-	return l.updateFilterPolicy()
+	return l.updateFilterPolicy(ctx)
+}
+
+func (l *Listener) UnlistenArchive(ctx context.Context, station string) error {
+	station = strings.ToUpper(station)
+	num, loaded := l.archiveSites.LoadOrStore(station, 0)
+	if loaded {
+		l.archiveSites.Store(station, num-1)
+	}
+	if num-1 == 0 {
+		l.archiveSites.Delete(station)
+	}
+	return l.updateFilterPolicy(ctx)
+}
+
+func (l *Listener) UnlistenChunk(ctx context.Context, station string) error {
+	station = strings.ToUpper(station)
+	num, loaded := l.chunkSites.LoadOrStore(station, 0)
+	if loaded {
+		l.chunkSites.Store(station, num-1)
+	}
+	if num-1 == 0 {
+		l.chunkSites.Delete(station)
+	}
+	return l.updateFilterPolicy(ctx)
 }
 
 func (l *Listener) runArchive() {
@@ -321,7 +349,7 @@ func (l *Listener) runArchive() {
 		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(l.archiveQueueURL),
 			MaxNumberOfMessages: 10,
-			WaitTimeSeconds:     20,
+			WaitTimeSeconds:     2,
 		})
 		// Break early since it's likely the listener will stop
 		// while waiting for messages
@@ -352,7 +380,7 @@ func (l *Listener) runChunk() {
 		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(l.chunkQueueURL),
 			MaxNumberOfMessages: 10,
-			WaitTimeSeconds:     20,
+			WaitTimeSeconds:     2,
 		})
 		// Break early since it's likely the listener will stop
 		// while waiting for messages
@@ -401,9 +429,11 @@ func (l *Listener) onArchiveMessage(msg types.Message) {
 		station := parts[3]
 		slog.Info("Received archive record", "station", station, "prefix", record.S3.Object.Key)
 
-		l.eventChan <- events.NexradArchiveEvent{
-			Station: station,
-			Path:    record.S3.Object.Key,
+		if l.running {
+			l.eventChan <- events.NexradArchiveEvent{
+				Station: station,
+				Path:    record.S3.Object.Key,
+			}
 		}
 	}
 }
@@ -423,12 +453,14 @@ func (l *Listener) onChunkMessage(msg types.Message) {
 
 	slog.Info("Received chunk record", "site", site, "volume", volume, "chunk", chunk, "chunkType", chunkType, "l2Version", l2Version)
 
-	l.eventChan <- events.NexradChunkEvent{
-		Station:   site,
-		Volume:    volume,
-		Chunk:     chunk,
-		ChunkType: chunkType,
-		L2Version: l2Version,
+	if l.running {
+		l.eventChan <- events.NexradChunkEvent{
+			Station:   site,
+			Volume:    volume,
+			Chunk:     chunk,
+			ChunkType: chunkType,
+			L2Version: l2Version,
+		}
 	}
 }
 
