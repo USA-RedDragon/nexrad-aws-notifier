@@ -1,6 +1,7 @@
 package sqs
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -9,11 +10,12 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sns"
-	"github.com/aws/aws-sdk-go/service/sqs"
-	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -26,10 +28,9 @@ type Listener struct {
 	eventChan                    chan events.Event
 	archiveSites                 []string
 	chunkSites                   []string
-	awsSession                   *session.Session
-	awsSqs                       *sqs.SQS
-	awsSns                       *sns.SNS
-	awsSts                       *sts.STS
+	awsSqs                       *sqs.Client
+	awsSns                       *sns.Client
+	awsSts                       *sts.Client
 	archiveQueueName             string
 	archiveQueueURL              string
 	chunkQueueName               string
@@ -40,12 +41,12 @@ type Listener struct {
 }
 
 func (l *Listener) ensureChunkQueue() error {
-	resp, err := l.awsSqs.GetQueueUrl(&sqs.GetQueueUrlInput{
+	resp, err := l.awsSqs.GetQueueUrl(context.TODO(), &sqs.GetQueueUrlInput{
 		QueueName: aws.String(l.chunkQueueName),
 	})
 	if err != nil {
 		// Queue does not exist, create it
-		resp, err := l.awsSqs.CreateQueue(&sqs.CreateQueueInput{
+		resp, err := l.awsSqs.CreateQueue(context.TODO(), &sqs.CreateQueueInput{
 			QueueName: aws.String(l.chunkQueueName),
 		})
 		if err != nil {
@@ -59,12 +60,12 @@ func (l *Listener) ensureChunkQueue() error {
 }
 
 func (l *Listener) ensureArchiveQueue() error {
-	resp, err := l.awsSqs.GetQueueUrl(&sqs.GetQueueUrlInput{
+	resp, err := l.awsSqs.GetQueueUrl(context.TODO(), &sqs.GetQueueUrlInput{
 		QueueName: aws.String(l.archiveQueueName),
 	})
 	if err != nil {
 		// Queue does not exist, create it
-		resp, err := l.awsSqs.CreateQueue(&sqs.CreateQueueInput{
+		resp, err := l.awsSqs.CreateQueue(context.TODO(), &sqs.CreateQueueInput{
 			QueueName: aws.String(l.archiveQueueName),
 		})
 		if err != nil {
@@ -78,26 +79,26 @@ func (l *Listener) ensureArchiveQueue() error {
 }
 
 func (l *Listener) ensureArchiveSubscription() error {
-	callerID, err := l.awsSts.GetCallerIdentity(&sts.GetCallerIdentityInput{})
+	callerID, err := l.awsSts.GetCallerIdentity(context.TODO(), &sts.GetCallerIdentityInput{})
 	if err != nil {
 		return err
 	}
 	sqsARN := fmt.Sprintf("arn:aws:sqs:us-east-1:%s:%s", *callerID.Account, l.archiveQueueName)
 
-	subs, err := l.awsSns.Subscribe(&sns.SubscribeInput{
+	subs, err := l.awsSns.Subscribe(context.TODO(), &sns.SubscribeInput{
 		Protocol:              aws.String("sqs"),
 		TopicArn:              aws.String(nexradArchiveTopicARN),
 		Endpoint:              aws.String(sqsARN),
-		ReturnSubscriptionArn: aws.Bool(true),
+		ReturnSubscriptionArn: true,
 	})
 	if err != nil {
 		return err
 	}
 	l.nexradArchiveSubscriptionARN = *subs.SubscriptionArn
-	_, err = l.awsSqs.SetQueueAttributes(&sqs.SetQueueAttributesInput{
+	_, err = l.awsSqs.SetQueueAttributes(context.TODO(), &sqs.SetQueueAttributesInput{
 		QueueUrl: aws.String(l.archiveQueueURL),
-		Attributes: map[string]*string{
-			"Policy": aws.String(fmt.Sprintf(`{
+		Attributes: map[string]string{
+			"Policy": fmt.Sprintf(`{
 				"Version": "2012-10-17",
 				"Statement": [
 					{
@@ -114,7 +115,7 @@ func (l *Listener) ensureArchiveSubscription() error {
 						}
 					}
 				]
-			}`, sqsARN, nexradArchiveTopicARN)),
+			}`, sqsARN, nexradArchiveTopicARN),
 		},
 	})
 	return err
@@ -140,7 +141,7 @@ func (l *Listener) updateFilterPolicy() error {
 		"SiteID": %s
 	}`, jsonSites)
 
-	_, err = l.awsSns.SetSubscriptionAttributes(&sns.SetSubscriptionAttributesInput{
+	_, err = l.awsSns.SetSubscriptionAttributes(context.TODO(), &sns.SetSubscriptionAttributesInput{
 		SubscriptionArn: aws.String(l.nexradChunkSubscriptionARN),
 		AttributeName:   aws.String("FilterPolicy"),
 		AttributeValue:  aws.String(filterPolicy),
@@ -150,31 +151,31 @@ func (l *Listener) updateFilterPolicy() error {
 }
 
 func (l *Listener) ensureChunkSubscription() error {
-	callerID, err := l.awsSts.GetCallerIdentity(&sts.GetCallerIdentityInput{})
+	callerID, err := l.awsSts.GetCallerIdentity(context.TODO(), &sts.GetCallerIdentityInput{})
 	if err != nil {
 		return err
 	}
 	sqsARN := fmt.Sprintf("arn:aws:sqs:us-east-1:%s:%s", *callerID.Account, l.chunkQueueName)
 
-	subs, err := l.awsSns.Subscribe(&sns.SubscribeInput{
+	subs, err := l.awsSns.Subscribe(context.TODO(), &sns.SubscribeInput{
 		Protocol:              aws.String("sqs"),
 		TopicArn:              aws.String(nexradChunkTopicARN),
 		Endpoint:              aws.String(sqsARN),
-		ReturnSubscriptionArn: aws.Bool(true),
-		Attributes: map[string]*string{
-			"FilterPolicy": aws.String(`{
+		ReturnSubscriptionArn: true,
+		Attributes: map[string]string{
+			"FilterPolicy": `{
 				"SiteID": ["nonsense"]
-			}`),
+			}`,
 		},
 	})
 	if err != nil {
 		return err
 	}
 	l.nexradChunkSubscriptionARN = *subs.SubscriptionArn
-	_, err = l.awsSqs.SetQueueAttributes(&sqs.SetQueueAttributesInput{
+	_, err = l.awsSqs.SetQueueAttributes(context.TODO(), &sqs.SetQueueAttributesInput{
 		QueueUrl: aws.String(l.chunkQueueURL),
-		Attributes: map[string]*string{
-			"Policy": aws.String(fmt.Sprintf(`{
+		Attributes: map[string]string{
+			"Policy": fmt.Sprintf(`{
 				"Version": "2012-10-17",
 				"Statement": [
 					{
@@ -191,7 +192,7 @@ func (l *Listener) ensureChunkSubscription() error {
 						}
 					}
 				]
-			}`, sqsARN, nexradChunkTopicARN)),
+			}`, sqsARN, nexradChunkTopicARN),
 		},
 	})
 	return err
@@ -201,7 +202,7 @@ func (l *Listener) destroyArchiveSubscription() error {
 	if l.nexradArchiveSubscriptionARN == "" {
 		return nil
 	}
-	_, err := l.awsSns.Unsubscribe(&sns.UnsubscribeInput{
+	_, err := l.awsSns.Unsubscribe(context.TODO(), &sns.UnsubscribeInput{
 		SubscriptionArn: aws.String(l.nexradArchiveSubscriptionARN),
 	})
 	return err
@@ -211,7 +212,7 @@ func (l *Listener) destroyChunkSubscription() error {
 	if l.nexradChunkSubscriptionARN == "" {
 		return nil
 	}
-	_, err := l.awsSns.Unsubscribe(&sns.UnsubscribeInput{
+	_, err := l.awsSns.Unsubscribe(context.TODO(), &sns.UnsubscribeInput{
 		SubscriptionArn: aws.String(l.nexradChunkSubscriptionARN),
 	})
 	return err
@@ -221,7 +222,7 @@ func (l *Listener) destroyArchiveQueue() error {
 	if l.archiveQueueURL == "" {
 		return nil
 	}
-	_, err := l.awsSqs.DeleteQueue(&sqs.DeleteQueueInput{
+	_, err := l.awsSqs.DeleteQueue(context.TODO(), &sqs.DeleteQueueInput{
 		QueueUrl: aws.String(l.archiveQueueURL),
 	})
 	return err
@@ -231,26 +232,33 @@ func (l *Listener) destroyChunkQueue() error {
 	if l.chunkQueueURL == "" {
 		return nil
 	}
-	_, err := l.awsSqs.DeleteQueue(&sqs.DeleteQueueInput{
+	_, err := l.awsSqs.DeleteQueue(context.TODO(), &sqs.DeleteQueueInput{
 		QueueUrl: aws.String(l.chunkQueueURL),
 	})
 	return err
 }
 
 func NewListener(eventChan chan events.Event) (*Listener, error) {
-	sess := session.Must(session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	}))
-	config := aws.NewConfig().WithRegion("us-east-1")
-	svc := sqs.New(sess, config)
-	snsSvc := sns.New(sess, config)
-	stsSvc := sts.New(sess, config)
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"), config.WithRetryMode(aws.RetryModeStandard), config.WithRetryMaxAttempts(10))
+	if err != nil {
+		return nil, err
+	}
+	svc := sqs.NewFromConfig(cfg)
+	cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"), config.WithRetryMode(aws.RetryModeStandard), config.WithRetryMaxAttempts(10))
+	if err != nil {
+		return nil, err
+	}
+	snsSvc := sns.NewFromConfig(cfg)
+	cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"), config.WithRetryMode(aws.RetryModeStandard), config.WithRetryMaxAttempts(10))
+	if err != nil {
+		return nil, err
+	}
+	stsSvc := sts.NewFromConfig(cfg)
 
 	listener := &Listener{
 		eventChan:        eventChan,
 		archiveSites:     []string{},
 		chunkSites:       []string{},
-		awsSession:       sess,
 		awsSqs:           svc,
 		awsSns:           snsSvc,
 		awsSts:           stsSvc,
@@ -259,7 +267,7 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		running:          true,
 	}
 
-	err := listener.ensureArchiveQueue()
+	err = listener.ensureArchiveQueue()
 	if err != nil {
 		return nil, err
 	}
@@ -310,10 +318,10 @@ func (l *Listener) ListenArchive(station string) error {
 func (l *Listener) runArchive() {
 	// Loop and poll the SQS queue
 	for l.running {
-		resp, err := l.awsSqs.ReceiveMessage(&sqs.ReceiveMessageInput{
+		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(l.archiveQueueURL),
-			MaxNumberOfMessages: aws.Int64(10),
-			WaitTimeSeconds:     aws.Int64(20),
+			MaxNumberOfMessages: 10,
+			WaitTimeSeconds:     20,
 		})
 		// Break early since it's likely the listener will stop
 		// while waiting for messages
@@ -326,7 +334,7 @@ func (l *Listener) runArchive() {
 		}
 		for _, msg := range resp.Messages {
 			// Delete the message
-			_, err := l.awsSqs.DeleteMessage(&sqs.DeleteMessageInput{
+			_, err := l.awsSqs.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
 				QueueUrl:      aws.String(l.archiveQueueURL),
 				ReceiptHandle: msg.ReceiptHandle,
 			})
@@ -341,10 +349,10 @@ func (l *Listener) runArchive() {
 func (l *Listener) runChunk() {
 	// Loop and poll the SQS queue
 	for l.running {
-		resp, err := l.awsSqs.ReceiveMessage(&sqs.ReceiveMessageInput{
+		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(l.chunkQueueURL),
-			MaxNumberOfMessages: aws.Int64(10),
-			WaitTimeSeconds:     aws.Int64(20),
+			MaxNumberOfMessages: 10,
+			WaitTimeSeconds:     20,
 		})
 		// Break early since it's likely the listener will stop
 		// while waiting for messages
@@ -357,7 +365,7 @@ func (l *Listener) runChunk() {
 		}
 		for _, msg := range resp.Messages {
 			// Delete the message
-			_, err := l.awsSqs.DeleteMessage(&sqs.DeleteMessageInput{
+			_, err := l.awsSqs.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
 				QueueUrl:      aws.String(l.chunkQueueURL),
 				ReceiptHandle: msg.ReceiptHandle,
 			})
@@ -369,7 +377,7 @@ func (l *Listener) runChunk() {
 	}
 }
 
-func (l *Listener) onArchiveMessage(msg *sqs.Message) {
+func (l *Listener) onArchiveMessage(msg types.Message) {
 	var notification ArchiveNotification
 	err := json.Unmarshal([]byte(*msg.Body), &notification)
 	if err != nil {
@@ -400,7 +408,7 @@ func (l *Listener) onArchiveMessage(msg *sqs.Message) {
 	}
 }
 
-func (l *Listener) onChunkMessage(msg *sqs.Message) {
+func (l *Listener) onChunkMessage(msg types.Message) {
 	var notification ChunkNotification
 	err := json.Unmarshal([]byte(*msg.Body), &notification)
 	if err != nil {
