@@ -1,0 +1,20 @@
+http:
+  ipv4_host: '0.0.0.0' # all interfaces
+  ipv6_host: '::' # all interfaces
+  port: 8080
+
+  trusted_proxies: []
+  cors_hosts: []
+
+  tracing:
+    enabled: false
+    otlp_endpoint: ''
+
+  pprof:
+    enabled: false
+
+  metrics:
+    enabled: false
+    ipv4_host: '127.0.0.1' # localhost
+    ipv6_host: '::1' # localhost
+    port: 8081
