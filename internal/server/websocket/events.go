@@ -53,13 +53,13 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 	case events.EventTypeNexradChunk:
 		err := sqsListener.ListenChunk(station)
 		if err != nil {
-			slog.Warn("Error listening to SQS:", err)
+			slog.Warn("Error listening to SQS:", "error", err)
 			return
 		}
 	case events.EventTypeNexradArchive:
 		err := sqsListener.ListenArchive(station)
 		if err != nil {
-			slog.Warn("Error listening to SQS:", err)
+			slog.Warn("Error listening to SQS:", "error", err)
 			return
 		}
 	}
