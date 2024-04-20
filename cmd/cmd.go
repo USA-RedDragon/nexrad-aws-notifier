@@ -92,7 +92,10 @@ func run(cmd *cobra.Command, _ []string) error {
 			slog.Info("Sleeping for 5 seconds")
 			time.Sleep(5 * time.Second)
 			slog.Info("Sending SIGTERM")
-			syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+			err = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+			if err != nil {
+				slog.Error("Failed to send SIGTERM", "error", err.Error())
+			}
 		}()
 	}
 
