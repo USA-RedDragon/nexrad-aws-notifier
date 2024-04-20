@@ -61,3 +61,5 @@ jobs:
     uses: ./.github/workflows/unit-test.yaml
     with:
       coverage: true
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

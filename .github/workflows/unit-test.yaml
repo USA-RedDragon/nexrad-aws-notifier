@@ -8,6 +8,8 @@ on:
         description: 'Run coverage tests'
         required: false
         default: false
+    secrets:
+      - CODECOV_TOKEN
 
 jobs:
   unit-tests:
