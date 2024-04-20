@@ -12,7 +12,7 @@ on:
       codecov_token:
         description: 'Codecov token'
         required: false
-      github_token:
+      token:
         description: 'GitHub token'
         required: false
 
@@ -76,7 +76,7 @@ jobs:
           check_retries: true
           detailed_summary: true
           fail_on_failure: true
-          token: ${{ secrets.github_token }}
+          token: ${{ secrets.token }}
           check_name: Unit Tests
 
       - uses: actions/upload-artifact@v4

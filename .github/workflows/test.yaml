@@ -57,7 +57,7 @@ jobs:
     if: github.event_name != 'push' && github.ref != 'refs/heads/main'
     uses: ./.github/workflows/unit-test.yaml
     secrets:
-      github_token: ${{ secrets.GITHUB_TOKEN }}
+      token: ${{ secrets.GITHUB_TOKEN }}
 
   unit-tests-coverage:
     uses: ./.github/workflows/unit-test.yaml
@@ -65,4 +65,4 @@ jobs:
       coverage: true
     secrets:
       codecov_token: ${{ secrets.CODECOV_TOKEN }}
-      github_token: ${{ secrets.GITHUB_TOKEN }}
+      token: ${{ secrets.GITHUB_TOKEN }}
