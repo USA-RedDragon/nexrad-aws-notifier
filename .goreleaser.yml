@@ -103,14 +103,14 @@ docker_manifests:
     image_templates:
       - "ghcr.io/usa-reddragon/{{ .ProjectName }}:latest-amd64"
       - "ghcr.io/usa-reddragon/{{ .ProjectName }}:latest-arm64"
+      - "ghcr.io/usa-reddragon/{{ .ProjectName }}:latest-amd64v2"
+      - "ghcr.io/usa-reddragon/{{ .ProjectName }}:latest-amd64v3"
 
 builds:
   - main: .
     binary: "{{ .ProjectName }}"
     goos:
       - linux
-      - windows
-      - darwin
     goarch:
       - amd64
       - arm64
@@ -120,13 +120,6 @@ builds:
       - v2
       - v3
       - v4
-    ignore:
-      - goos: darwin
-        goarch: '386'
-      - goos: darwin
-        goarch: riscv64
-      - goos: windows
-        goarch: riscv64
     env:
       - CGO_ENABLED=0
     ldflags:
