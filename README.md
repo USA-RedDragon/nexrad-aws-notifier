@@ -1,5 +1,7 @@
 # NEXRAD AWS Notifier
 
+[![Release](https://github.com/USA-RedDragon/nexrad-aws-notifier/actions/workflows/release.yaml/badge.svg)](https://github.com/USA-RedDragon/nexrad-aws-notifier/actions/workflows/release.yaml) [![License](https://badgen.net/github/license/USA-RedDragon/nexrad-aws-notifier)](https://github.com/USA-RedDragon/nexrad-aws-notifier/blob/master/LICENSE) [![go.mod version](https://img.shields.io/github/go-mod/go-version/USA-RedDragon/nexrad-aws-notifier.svg)](https://github.com/USA-RedDragon/nexrad-aws-notifier) [![GoReportCard](https://goreportcard.com/badge/github.com/USA-RedDragon/nexrad-aws-notifier)](https://goreportcard.com/report/github.com/USA-RedDragon/nexrad-aws-notifier) [![codecov](https://codecov.io/gh/USA-RedDragon/nexrad-aws-notifier/graph/badge.svg?token=X7TNDSRN58)](https://codecov.io/gh/USA-RedDragon/nexrad-aws-notifier)
+
 This is a simple Go service that subscribes to the AWS SNS topic for NEXRAD radar data and forwards the notification via websocket to any connected clients.
 
 ## Configuration
