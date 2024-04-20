@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -38,7 +39,7 @@ type Listener struct {
 	chunkQueueURL                string
 	nexradChunkSubscriptionARN   string
 	nexradArchiveSubscriptionARN string
-	running                      bool
+	running                      atomic.Bool
 }
 
 func (l *Listener) ensureChunkQueue() error {
@@ -275,8 +276,9 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		awsSts:           stsSvc,
 		archiveQueueName: fmt.Sprintf("nexrad-aws-notifier-events-archive-%s", archiveQueueUUID.String()),
 		chunkQueueName:   fmt.Sprintf("nexrad-aws-notifier-events-chunk-%s", chunkQueueUUID.String()),
-		running:          true,
+		running:          atomic.Bool{},
 	}
+	listener.running.Store(true)
 
 	err = listener.ensureArchiveQueue()
 	if err != nil {
@@ -354,7 +356,7 @@ func (l *Listener) UnlistenChunk(ctx context.Context, station string) error {
 
 func (l *Listener) runArchive() {
 	// Loop and poll the SQS queue
-	for l.running {
+	for l.running.Load() {
 		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(l.archiveQueueURL),
 			MaxNumberOfMessages: 10,
@@ -362,7 +364,7 @@ func (l *Listener) runArchive() {
 		})
 		// Break early since it's likely the listener will stop
 		// while waiting for messages
-		if !l.running {
+		if !l.running.Load() {
 			break
 		}
 		if err != nil {
@@ -385,7 +387,7 @@ func (l *Listener) runArchive() {
 
 func (l *Listener) runChunk() {
 	// Loop and poll the SQS queue
-	for l.running {
+	for l.running.Load() {
 		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(l.chunkQueueURL),
 			MaxNumberOfMessages: 10,
@@ -393,7 +395,7 @@ func (l *Listener) runChunk() {
 		})
 		// Break early since it's likely the listener will stop
 		// while waiting for messages
-		if !l.running {
+		if !l.running.Load() {
 			break
 		}
 		if err != nil {
@@ -438,7 +440,7 @@ func (l *Listener) onArchiveMessage(msg types.Message) {
 		station := parts[3]
 		slog.Info("Received archive record", "station", station, "prefix", record.S3.Object.Key)
 
-		if l.running {
+		if l.running.Load() {
 			l.eventChan <- events.NexradArchiveEvent{
 				Station: station,
 				Path:    record.S3.Object.Key,
@@ -462,7 +464,7 @@ func (l *Listener) onChunkMessage(msg types.Message) {
 
 	slog.Info("Received chunk record", "site", site, "volume", volume, "chunk", chunk, "chunkType", chunkType, "l2Version", l2Version)
 
-	if l.running {
+	if l.running.Load() {
 		l.eventChan <- events.NexradChunkEvent{
 			Station:   site,
 			Volume:    volume,
@@ -474,7 +476,7 @@ func (l *Listener) onChunkMessage(msg types.Message) {
 }
 
 func (l *Listener) Stop() error {
-	l.running = false
+	l.running.Store(false)
 	errGrp := errgroup.Group{}
 	errGrp.SetLimit(2)
 	errGrp.Go(func() error {
