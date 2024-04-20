@@ -9,7 +9,12 @@ on:
         required: false
         default: false
     secrets:
-      - CODECOV_TOKEN
+      codecov_token:
+        description: 'Codecov token'
+        required: false
+      github_token:
+        description: 'GitHub token'
+        required: false
 
 jobs:
   unit-tests:
@@ -51,7 +56,7 @@ jobs:
       - uses: codecov/codecov-action@v4
         if: always() && inputs.coverage
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ secrets.codecov_token }}
           fail_ci_if_error: true
 
       - uses: actions/upload-artifact@v4
@@ -71,7 +76,7 @@ jobs:
           check_retries: true
           detailed_summary: true
           fail_on_failure: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.github_token }}
           check_name: Unit Tests
 
       - uses: actions/upload-artifact@v4
