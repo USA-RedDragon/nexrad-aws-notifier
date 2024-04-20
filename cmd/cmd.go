@@ -62,24 +62,18 @@ func run(cmd *cobra.Command, _ []string) error {
 		slog.Info("Shutting down")
 
 		errGrp := errgroup.Group{}
-		errGrp.SetLimit(2)
 
-		if server != nil {
-			errGrp.Go(func() error {
-				return server.Stop()
-			})
-		}
+		errGrp.Go(func() error {
+			return server.Stop()
+		})
 
 		errGrp.Go(func() error {
 			return sqsListener.Stop()
 		})
 
-		errGrp.Go(func() error {
-			close(eventChannel)
-			return nil
-		})
-
 		err := errGrp.Wait()
+		// We always want to close the event channel before exiting
+		close(eventChannel)
 		if err != nil {
 			slog.Error("Shutdown error", "error", err.Error())
 			os.Exit(1)
