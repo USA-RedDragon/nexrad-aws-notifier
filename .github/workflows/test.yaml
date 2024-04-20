@@ -2,6 +2,9 @@ name: Tests
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
 
 permissions:
   id-token: write      # Required for aws-actions/configure-aws-credentials
@@ -10,6 +13,7 @@ permissions:
 
 jobs:
   benchmark-tests:
+    if: github.event_name != 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-22.04
 
     steps:
@@ -26,6 +30,7 @@ jobs:
       - run: CGO_ENABLED=0 go test -run ^$ -benchmem -bench=. ./...
 
   race-tests:
+    if: github.event_name != 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-22.04
 
     steps:
@@ -49,6 +54,7 @@ jobs:
         run: go test ./... -race
 
   unit-tests:
+    if: github.event_name != 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-22.04
 
     steps:
