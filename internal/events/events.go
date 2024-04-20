@@ -45,7 +45,3 @@ func NewEventBus() *EventBus {
 func (eb *EventBus) GetChannel() chan Event {
 	return eb.eventQueue
 }
-
-func (eb *EventBus) Close() {
-	close(eb.eventQueue)
-}

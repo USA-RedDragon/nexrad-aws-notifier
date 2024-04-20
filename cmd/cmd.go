@@ -44,14 +44,15 @@ func run(cmd *cobra.Command, _ []string) error {
 	eventBus := events.NewEventBus()
 	slog.Info("Event bus started")
 
-	sqsListener, err := sqs.NewListener(eventBus.GetChannel())
+	eventChannel := eventBus.GetChannel()
+	sqsListener, err := sqs.NewListener(eventChannel)
 	if err != nil {
 		return fmt.Errorf("failed to create SQS listener: %w", err)
 	}
 	slog.Info("SQS listener started")
 
 	slog.Info("Starting HTTP server")
-	server := server.NewServer(&config.HTTP, eventBus.GetChannel(), sqsListener)
+	server := server.NewServer(&config.HTTP, eventChannel, sqsListener)
 	err = server.Start()
 	if err != nil {
 		return fmt.Errorf("failed to start HTTP server: %w", err)
@@ -73,7 +74,7 @@ func run(cmd *cobra.Command, _ []string) error {
 		})
 
 		errGrp.Go(func() error {
-			eventBus.Close()
+			close(eventChannel)
 			return nil
 		})
 
