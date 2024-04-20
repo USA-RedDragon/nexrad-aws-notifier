@@ -55,9 +55,9 @@ jobs:
 
   unit-tests:
     if: github.event_name != 'push' && github.ref != 'refs/heads/main'
-    uses: .github/workflows/unit-test.yaml
+    uses: ./.github/workflows/unit-test.yaml
 
   unit-tests-coverage:
-    uses: .github/workflows/unit-test.yaml
+    uses: ./.github/workflows/unit-test.yaml
     with:
       coverage: true
