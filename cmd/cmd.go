@@ -88,12 +88,15 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 
 	if cmd.Annotations["version"] == "testing" {
+		doneChannel := make(chan struct{})
 		go func() {
 			slog.Info("Sleeping for 5 seconds")
 			time.Sleep(5 * time.Second)
 			slog.Info("Sending SIGTERM")
 			stop(syscall.SIGTERM)
+			doneChannel <- struct{}{}
 		}()
+		<-doneChannel
 	} else {
 		shutdown.AddWithParam(stop)
 		shutdown.Listen(syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM, syscall.SIGQUIT)
