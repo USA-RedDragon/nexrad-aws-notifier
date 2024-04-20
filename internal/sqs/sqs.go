@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/google/uuid"
 	"github.com/puzpuzpuz/xsync/v3"
 	"golang.org/x/sync/errgroup"
 )
@@ -257,6 +257,15 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 	}
 	stsSvc := sts.NewFromConfig(cfg)
 
+	archiveQueueUUID, err := uuid.NewV7()
+	if err != nil {
+		return nil, err
+	}
+	chunkQueueUUID, err := uuid.NewV7()
+	if err != nil {
+		return nil, err
+	}
+
 	listener := &Listener{
 		eventChan:        eventChan,
 		archiveSites:     xsync.NewMapOf[string, uint](),
@@ -264,8 +273,8 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		awsSqs:           svc,
 		awsSns:           snsSvc,
 		awsSts:           stsSvc,
-		archiveQueueName: fmt.Sprintf("nexrad-aws-notifier-events-archive-%d", time.Now().Unix()),
-		chunkQueueName:   fmt.Sprintf("nexrad-aws-notifier-events-chunk-%d", time.Now().Unix()),
+		archiveQueueName: fmt.Sprintf("nexrad-aws-notifier-events-archive-%s", archiveQueueUUID.String()),
+		chunkQueueName:   fmt.Sprintf("nexrad-aws-notifier-events-chunk-%s", chunkQueueUUID.String()),
 		running:          true,
 	}
 
