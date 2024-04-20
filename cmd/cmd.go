@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/config"
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
@@ -85,6 +86,16 @@ func run(cmd *cobra.Command, _ []string) error {
 	}
 
 	shutdown.AddWithParam(stop)
+
+	if cmd.Annotations["version"] == "testing" {
+		go func() {
+			slog.Info("Sleeping for 5 seconds")
+			time.Sleep(5 * time.Second)
+			slog.Info("Sending SIGTERM")
+			syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		}()
+	}
+
 	shutdown.Listen(syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM, syscall.SIGQUIT)
 
 	return nil
