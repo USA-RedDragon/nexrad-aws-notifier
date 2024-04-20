@@ -6,13 +6,11 @@ on:
 permissions:
   id-token: write      # Required for aws-actions/configure-aws-credentials
   contents: read       # Required for actions/checkout
+  checks:   write      # Required for GitHub Checks API
 
 jobs:
   benchmark-tests:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      checks: write
 
     steps:
       - name: Checkout repository
@@ -29,9 +27,6 @@ jobs:
 
   race-tests:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      checks: write
 
     steps:
       - name: Checkout repository
@@ -55,9 +50,6 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      checks: write
 
     steps:
       - name: Checkout repository
@@ -115,9 +107,6 @@ jobs:
 
   unit-tests-coverage:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      checks: write
 
     steps:
       - name: Checkout repository
