@@ -62,6 +62,7 @@ func run(cmd *cobra.Command, _ []string) error {
 		slog.Info("Shutting down")
 
 		errGrp := errgroup.Group{}
+		errGrp.SetLimit(2)
 
 		if server != nil {
 			errGrp.Go(func() error {
@@ -86,21 +87,17 @@ func run(cmd *cobra.Command, _ []string) error {
 		slog.Info("Shutdown complete")
 	}
 
-	shutdown.AddWithParam(stop)
-
 	if cmd.Annotations["version"] == "testing" {
 		go func() {
 			slog.Info("Sleeping for 5 seconds")
 			time.Sleep(5 * time.Second)
 			slog.Info("Sending SIGTERM")
-			err = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-			if err != nil {
-				slog.Error("Failed to send SIGTERM", "error", err.Error())
-			}
+			stop(syscall.SIGTERM)
 		}()
+	} else {
+		shutdown.AddWithParam(stop)
+		shutdown.Listen(syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM, syscall.SIGQUIT)
 	}
-
-	shutdown.Listen(syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM, syscall.SIGQUIT)
 
 	return nil
 }
