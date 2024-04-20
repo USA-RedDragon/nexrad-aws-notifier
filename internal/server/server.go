@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/config"
@@ -23,7 +24,7 @@ type Server struct {
 	ipv6Server        *http.Server
 	metricsIPV4Server *http.Server
 	metricsIPV6Server *http.Server
-	stopped           bool
+	stopped           atomic.Bool
 	config            *config.HTTP
 }
 
@@ -100,7 +101,7 @@ func (s *Server) Start() error {
 		waitGrp.Add(1)
 		go func() {
 			defer waitGrp.Done()
-			if err := s.ipv4Server.Serve(ipv4Listener); err != nil && !s.stopped {
+			if err := s.ipv4Server.Serve(ipv4Listener); err != nil && !s.stopped.Load() {
 				slog.Error("HTTP IPv4 server error", "error", err.Error())
 			}
 		}()
@@ -114,7 +115,7 @@ func (s *Server) Start() error {
 		waitGrp.Add(1)
 		go func() {
 			defer waitGrp.Done()
-			if err := s.ipv6Server.Serve(ipv6Listener); err != nil && !s.stopped {
+			if err := s.ipv6Server.Serve(ipv6Listener); err != nil && !s.stopped.Load() {
 				slog.Error("HTTP IPv6 server error", "error", err.Error())
 			}
 		}()
@@ -130,7 +131,7 @@ func (s *Server) Start() error {
 			waitGrp.Add(1)
 			go func() {
 				defer waitGrp.Done()
-				if err := s.metricsIPV4Server.Serve(metricsIPV4Listener); err != nil && !s.stopped {
+				if err := s.metricsIPV4Server.Serve(metricsIPV4Listener); err != nil && !s.stopped.Load() {
 					slog.Error("Metrics IPv4 server error", "error", err.Error())
 				}
 			}()
@@ -144,7 +145,7 @@ func (s *Server) Start() error {
 			waitGrp.Add(1)
 			go func() {
 				defer waitGrp.Done()
-				if err := s.metricsIPV6Server.Serve(metricsIPV6Listener); err != nil && !s.stopped {
+				if err := s.metricsIPV6Server.Serve(metricsIPV6Listener); err != nil && !s.stopped.Load() {
 					slog.Error("Metrics IPv6 server error", "error", err.Error())
 				}
 			}()
@@ -162,7 +163,7 @@ func (s *Server) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	s.stopped = true
+	s.stopped.Store(true)
 
 	errGrp := errgroup.Group{}
 	if s.ipv4Server != nil {
