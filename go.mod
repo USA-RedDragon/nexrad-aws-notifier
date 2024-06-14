@@ -11,7 +11,7 @@ require (
 	github.com/gin-contrib/pprof v1.5.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.2
+	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.19.1
 	github.com/puzpuzpuz/xsync/v3 v3.1.0
 	github.com/spf13/cobra v1.8.0
