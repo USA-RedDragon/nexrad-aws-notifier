@@ -37,9 +37,13 @@ The events emitted by the websocket for `chunk` data are JSON objects with the f
   "volume": "415",
   "chunk": "25",
   "chunkType": "I",
-  "l2Version": "V06"
+  "l2Version": "V06",
+  "name": "20240418-033635-025-I",
+  "path": "KJAX/415/20240418-033635-025-I"
 }
 ```
+
+`path` is the S3 object key within the `unidata-nexrad-level2-chunks` bucket and `name` is its final segment. The datetime in the key is the volume start time, which is not derivable from the other fields, so `path` is taken directly from the SNS notification rather than reconstructed.
 
 ### GET `/health`
 

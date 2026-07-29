@@ -462,7 +462,20 @@ func (l *Listener) onChunkMessage(msg types.Message) {
 	l2Version := notification.MessageAttributes["L2Version"].Value
 	chunkType := notification.MessageAttributes["ChunkType"].Value
 
-	slog.Info("Received chunk record", "site", site, "volume", volume, "chunk", chunk, "chunkType", chunkType, "l2Version", l2Version)
+	// The message attributes don't carry the volume start time, so the object
+	// key can't be rebuilt from them. The message body has it verbatim.
+	var message ChunkNotificationMessage
+	if err := json.Unmarshal([]byte(notification.Message), &message); err != nil {
+		slog.Warn("Error unmarshalling chunk message:", "error", err)
+	}
+
+	// Key is SITE/VOLUME/yyyymmdd-hhmmss-NNN-T
+	name := message.Key
+	if idx := strings.LastIndex(name, "/"); idx != -1 {
+		name = name[idx+1:]
+	}
+
+	slog.Info("Received chunk record", "site", site, "volume", volume, "chunk", chunk, "chunkType", chunkType, "l2Version", l2Version, "path", message.Key)
 
 	if l.running.Load() {
 		l.eventChan <- events.NexradChunkEvent{
@@ -471,6 +484,8 @@ func (l *Listener) onChunkMessage(msg types.Message) {
 			Chunk:     chunk,
 			ChunkType: chunkType,
 			L2Version: l2Version,
+			Name:      name,
+			Path:      message.Key,
 		}
 	}
 }

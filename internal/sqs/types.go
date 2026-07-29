@@ -52,3 +52,14 @@ type ChunkNotification struct {
 		Value string `json:"Value"`
 	}
 }
+
+type ChunkNotificationMessage struct {
+	S3Bucket  string `json:"S3Bucket"`
+	Key       string `json:"Key"`
+	SiteID    string `json:"SiteID"`
+	DateTime  string `json:"DateTime"`
+	VolumeID  string `json:"VolumeID"`
+	ChunkID   string `json:"ChunkID"`
+	ChunkType string `json:"ChunkType"`
+	L2Version string `json:"L2Version"`
+}

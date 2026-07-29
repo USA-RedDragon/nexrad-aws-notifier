@@ -17,6 +17,8 @@ type NexradChunkEvent struct {
 	Chunk     string `json:"chunk"`
 	ChunkType string `json:"chunkType"`
 	L2Version string `json:"l2Version"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
 }
 
 func (e NexradChunkEvent) GetType() EventType {
