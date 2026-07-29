@@ -8,7 +8,7 @@ This is a simple Go service that subscribes to the AWS SNS topic for NEXRAD rada
 
 To run this service, you will need to have a valid AWS account and have the necessary permissions to subscribe to the NEXRAD SNS topic. The service uses the AWS SDK for Go, so it will use the default credentials chain to authenticate with AWS, which includes environment variables, shared credentials file, and IAM roles for Amazon EC2. This service does not support credentials in the configuration file.
 
-The service is configured via environment variables, a configuration YAML file, or command line flags. The [`config.example.yaml`](config.example.yaml) file shows the available configuration options. The command line flags match the schema of the YAML file, i.e. `--http.cors_hosts='0.0.0.0'` would equate to `http.cors_hosts: ["0.0.0.0"]`. Environment variables are in the same format, however they are uppercase and replace hyphens with underscores and dots with double underscores, i.e. `HTTP__CORS_HOSTS="0.0.0.0"`.
+The service is configured via environment variables, a configuration YAML file, or command line flags. The [`config.example.yaml`](config.example.yaml) file shows the available configuration options. The command line flags match the schema of the YAML file, i.e. `--http.cors_hosts='0.0.0.0'` would equate to `http.cors_hosts: ["0.0.0.0"]`. Environment variables are in the same format, however they are uppercase and replace hyphens with underscores and dots with underscores, i.e. `HTTP_CORS_HOSTS="0.0.0.0"`.
 
 ## Routes
 

@@ -29,8 +29,8 @@ func TestTracing(t *testing.T) {
 }
 
 func TestEnvConfig(t *testing.T) {
-	t.Setenv("HTTP__PORT", "8087")
-	t.Setenv("HTTP__METRICS__PORT", "8088")
+	t.Setenv("HTTP_PORT", "8087")
+	t.Setenv("HTTP_METRICS_PORT", "8088")
 	baseCmd := cmd.NewCommand("testing", "deadbeef")
 	err := baseCmd.Execute()
 	if err != nil {

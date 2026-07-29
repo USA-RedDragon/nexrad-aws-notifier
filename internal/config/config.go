@@ -99,7 +99,7 @@ func LoadConfig(cmd *cobra.Command) (*Config, error) {
 		if ctx.Err() != nil {
 			return
 		}
-		optName := strings.ReplaceAll(strings.ReplaceAll(strings.ToUpper(f.Name), "-", "_"), ".", "__")
+		optName := strings.ReplaceAll(strings.ReplaceAll(strings.ToUpper(f.Name), "-", "_"), ".", "_")
 		if val, ok := os.LookupEnv(optName); !f.Changed && ok {
 			if err := f.Value.Set(val); err != nil {
 				cancel(err)
