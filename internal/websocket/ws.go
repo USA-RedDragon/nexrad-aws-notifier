@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/config"
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
@@ -15,18 +16,28 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const bufferSize = 1024
+const (
+	bufferSize = 1024
+	// writeWait bounds how long the close handshake may take.
+	writeWait = 5 * time.Second
+	// teardownTimeout bounds the SQS unsubscribe performed on disconnect.
+	teardownTimeout = 10 * time.Second
+)
 
 type Websocket interface {
 	OnMessage(ctx context.Context, r *http.Request, w Writer, msg []byte, t int)
-	OnConnect(ctx context.Context, r *http.Request, w Writer, messageType events.EventType, station string, sqsListener *sqs.Listener)
+	// OnConnect prepares the connection. Returning an error aborts it, and
+	// OnDisconnect will not run, so subscriptions stay balanced.
+	OnConnect(ctx context.Context, r *http.Request, w Writer, messageType events.EventType, station string, sqsListener *sqs.Listener) error
 	OnDisconnect(ctx context.Context, r *http.Request, messageType events.EventType, station string, sqsListener *sqs.Listener)
 }
 
 type WSHandler struct {
 	wsUpgrader websocket.Upgrader
-	handler    Websocket
-	conn       *websocket.Conn
+	// newHandler builds per-connection state. The gin handler is registered
+	// once but serves every connection concurrently, so nothing connection
+	// scoped may live on WSHandler itself.
+	newHandler func() Websocket
 }
 
 // OriginAllowed reports whether an Origin header matches one of the configured
@@ -77,7 +88,7 @@ func OriginAllowed(origin string, corsHosts []string) bool {
 	return false
 }
 
-func CreateHandler(ws Websocket, config *config.HTTP) func(*gin.Context) {
+func CreateHandler(newHandler func() Websocket, config *config.HTTP) func(*gin.Context) {
 	handler := &WSHandler{
 		wsUpgrader: websocket.Upgrader{
 			HandshakeTimeout: 0,
@@ -88,7 +99,10 @@ func CreateHandler(ws Websocket, config *config.HTTP) func(*gin.Context) {
 			Error: func(w http.ResponseWriter, r *http.Request, status int, reason error) {
 				slog.Warn("Websocket handshake failed",
 					"status", status, "reason", reason,
-					"origin", r.Header.Get("Origin"), "remote", r.RemoteAddr)
+					"origin", r.Header.Get("Origin"), "remote", r.RemoteAddr,
+					// The key is a per-connection nonce, not a secret, and a
+					// malformed one is the most common handshake failure.
+					"sec_websocket_key", r.Header.Values("Sec-Websocket-Key"))
 				w.Header().Set("Sec-Websocket-Version", "13")
 				http.Error(w, http.StatusText(status), status)
 			},
@@ -102,50 +116,67 @@ func CreateHandler(ws Websocket, config *config.HTTP) func(*gin.Context) {
 			},
 			EnableCompression: true,
 		},
-		handler: ws,
+		newHandler: newHandler,
 	}
 
 	return func(c *gin.Context) {
-		conn, err := handler.wsUpgrader.Upgrade(c.Writer, c.Request, nil)
-		if err != nil {
-			slog.Error("Failed to set websocket upgrade", "error", err)
-			return
-		}
-		handler.conn = conn
-
+		// Validate before upgrading so a bad request gets a real HTTP status
+		// rather than a websocket that closes immediately.
 		messageType := events.EventType(c.Param("type"))
 		station := c.Param("station")
 		if messageType == "" || station == "" {
+			c.String(http.StatusBadRequest, "type and station are required")
 			return
 		}
 		sqsListener, ok := c.MustGet("sqsListener").(*sqs.Listener)
 		if !ok {
 			slog.Error("Failed to get sqsListener")
+			c.String(http.StatusInternalServerError, "SQS listener unavailable")
 			return
 		}
 
+		conn, err := handler.wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			// The Error hook above has already written the response.
+			slog.Error("Failed to set websocket upgrade", "error", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		connHandler := handler.newHandler()
 		defer func() {
-			handler.handler.OnDisconnect(c, c.Request, messageType, station, sqsListener)
-			_ = handler.conn.Close()
+			// The request context is cancelled the moment this handler
+			// returns, but unsubscribing from SQS still needs a live one.
+			ctx, cancel := context.WithTimeout(
+				context.WithoutCancel(c.Request.Context()), teardownTimeout)
+			defer cancel()
+			connHandler.OnDisconnect(ctx, c.Request, messageType, station, sqsListener)
 		}()
 
-		handler.handle(c.Request.Context(), c.Request, messageType, station, sqsListener)
+		handle(c.Request.Context(), conn, connHandler, c.Request, messageType, station, sqsListener)
 	}
 }
 
-func (h *WSHandler) handle(c context.Context, r *http.Request, messageType events.EventType, station string, sqsListener *sqs.Listener) {
-	writer := wsWriter{
-		writer: make(chan Message, bufferSize),
-		error:  make(chan string),
+func handle(ctx context.Context, conn *websocket.Conn, handler Websocket, r *http.Request, messageType events.EventType, station string, sqsListener *sqs.Listener) {
+	writer := newWSWriter(bufferSize)
+	// Unblocks the reader goroutine below once this function returns.
+	defer writer.Close()
+
+	if err := handler.OnConnect(ctx, r, writer, messageType, station, sqsListener); err != nil {
+		slog.Warn("Websocket connect failed", "error", err, "type", messageType, "station", station)
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "failed to subscribe"),
+			time.Now().Add(writeWait))
+		return
 	}
-	h.handler.OnConnect(c, r, writer, messageType, station, sqsListener)
 
 	go func() {
 		for {
-			t, msg, err := h.conn.ReadMessage()
+			t, msg, err := conn.ReadMessage()
 			if err != nil {
 				writer.Error("read failed")
-				break
+				return
 			}
 			switch {
 			case t == websocket.PingMessage:
@@ -158,20 +189,21 @@ func (h *WSHandler) handle(c context.Context, r *http.Request, messageType event
 					Data: []byte("PONG"),
 				})
 			default:
-				h.handler.OnMessage(c, r, writer, msg, t)
+				handler.OnMessage(ctx, r, writer, msg, t)
 			}
 		}
 	}()
 
+	// All writes to conn happen here, on one goroutine, because gorilla
+	// connections do not support concurrent writers.
 	for {
 		select {
-		case <-c.Done():
+		case <-ctx.Done():
 			return
 		case <-writer.error:
 			return
 		case msg := <-writer.writer:
-			err := h.conn.WriteMessage(msg.Type, msg.Data)
-			if err != nil {
+			if err := conn.WriteMessage(msg.Type, msg.Data); err != nil {
 				return
 			}
 		}

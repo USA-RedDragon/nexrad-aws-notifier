@@ -15,6 +15,10 @@ func applyRoutes(r *gin.Engine, config *config.HTTP, eventsChannel chan events.E
 		c.String(http.StatusOK, "OK")
 	})
 
+	// One hub broadcasts to every connection; CreateHandler builds the
+	// per-connection state itself.
+	hub := websocketControllers.NewEventsHub(eventsChannel)
+
 	ws := r.Group("/ws")
-	ws.GET("/events/:type/:station", websocket.CreateHandler(websocketControllers.CreateEventsWebsocket(eventsChannel), config))
+	ws.GET("/events/:type/:station", websocket.CreateHandler(hub.NewConnection, config))
 }
