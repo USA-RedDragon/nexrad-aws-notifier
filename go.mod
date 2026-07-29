@@ -1,6 +1,6 @@
 module github.com/USA-RedDragon/nexrad-aws-notifier
 
-go 1.22.6
+go 1.24
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.31.0
@@ -13,7 +13,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.20.4
-	github.com/puzpuzpuz/xsync/v3 v3.4.0
+	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
 	github.com/ztrue/shutdown v0.1.1
