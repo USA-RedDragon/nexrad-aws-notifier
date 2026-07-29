@@ -17,7 +17,10 @@ http:
   # This is a list of IP addresses or CIDR ranges that are trusted proxies.
   trusted_proxies: []
 
-  # Sets which hosts are allowed by CORS. This is a list of hostnames or IP addresses.
+  # Sets which origins are allowed to open a websocket. Entries may be a bare host
+  # ('example.com', matching any port), a host:port ('example.com:8080'), or a full
+  # URL ('https://example.com'). Use '*' to allow any origin.
+  # Note: the environment variable for this is HTTP_CORS_HOSTS (plural).
   cors_hosts: []
 
   # OpenTelemetry configuration

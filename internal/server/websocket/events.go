@@ -100,7 +100,7 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 				}
 				eventDataJSON, err := json.Marshal(event)
 				if err != nil {
-					slog.Warn("Error marshalling event data:", err)
+					slog.Warn("Error marshalling event data", "error", err)
 					continue
 				}
 				w.WriteMessage(websocket.Message{
@@ -121,12 +121,12 @@ func (c *EventsWebsocket) OnDisconnect(ctx context.Context, _ *http.Request, mes
 	case events.EventTypeNexradChunk:
 		err := sqsListener.UnlistenChunk(ctx, station)
 		if err != nil {
-			slog.Warn("Error stopping SQS listener:", err)
+			slog.Warn("Error stopping SQS listener", "error", err)
 		}
 	case events.EventTypeNexradArchive:
 		err := sqsListener.UnlistenArchive(ctx, station)
 		if err != nil {
-			slog.Warn("Error stopping SQS listener:", err)
+			slog.Warn("Error stopping SQS listener", "error", err)
 		}
 	default:
 		slog.Warn("Unknown event type", "type", messageType)

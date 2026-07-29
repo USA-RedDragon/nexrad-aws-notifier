@@ -3,7 +3,9 @@ package websocket
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/config"
@@ -27,6 +29,54 @@ type WSHandler struct {
 	conn       *websocket.Conn
 }
 
+// OriginAllowed reports whether an Origin header matches one of the configured
+// CORS hosts. A configured host of "*" allows any origin. Hosts may be given as
+// a bare host, a host:port, or a full URL; an entry without a port matches the
+// origin on any port.
+func OriginAllowed(origin string, corsHosts []string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	originHost := strings.ToLower(parsed.Hostname())
+	originPort := parsed.Port()
+	if originPort == "" {
+		// Fill in the scheme's default so that https://example.com matches a
+		// configured example.com:443.
+		switch strings.ToLower(parsed.Scheme) {
+		case "https", "wss":
+			originPort = "443"
+		case "http", "ws":
+			originPort = "80"
+		}
+	}
+
+	for _, host := range corsHosts {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "*" {
+			return true
+		}
+		// Accept a full URL by dropping the scheme and anything past the host.
+		if scheme := strings.Index(host, "://"); scheme != -1 {
+			host = host[scheme+len("://"):]
+		}
+		host = strings.SplitN(host, "/", 2)[0]
+
+		wantHost, wantPort, err := net.SplitHostPort(host)
+		if err != nil {
+			// No port configured, so match on host alone.
+			if strings.Trim(host, "[]") == originHost {
+				return true
+			}
+			continue
+		}
+		if wantHost == originHost && wantPort == originPort {
+			return true
+		}
+	}
+	return false
+}
+
 func CreateHandler(ws Websocket, config *config.HTTP) func(*gin.Context) {
 	handler := &WSHandler{
 		wsUpgrader: websocket.Upgrader{
@@ -36,26 +86,19 @@ func CreateHandler(ws Websocket, config *config.HTTP) func(*gin.Context) {
 			WriteBufferPool:  nil,
 			Subprotocols:     []string{},
 			Error: func(w http.ResponseWriter, r *http.Request, status int, reason error) {
+				slog.Warn("Websocket handshake failed",
+					"status", status, "reason", reason,
+					"origin", r.Header.Get("Origin"), "remote", r.RemoteAddr)
+				w.Header().Set("Sec-Websocket-Version", "13")
+				http.Error(w, http.StatusText(status), status)
 			},
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
 				if origin == "" {
+					// Non-browser clients omit Origin entirely.
 					return true
 				}
-				origin = strings.ToLower(origin)
-				for _, host := range config.CORSHosts {
-					host = strings.ToLower(host)
-					if strings.HasSuffix(host, ":443") && strings.HasPrefix(origin, "https://") {
-						host = strings.TrimSuffix(host, ":443")
-					}
-					if strings.HasSuffix(host, ":80") && strings.HasPrefix(origin, "http://") {
-						host = strings.TrimSuffix(host, ":80")
-					}
-					if strings.Contains(origin, host) {
-						return true
-					}
-				}
-				return false
+				return OriginAllowed(origin, config.CORSHosts)
 			},
 			EnableCompression: true,
 		},
