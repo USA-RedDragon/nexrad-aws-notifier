@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	nexradArchiveTopicARN = "arn:aws:sns:us-east-1:811054952067:NewNEXRADLevel2Archive"
+	nexradArchiveTopicARN = "arn:aws:sns:us-east-1:684042711724:NewNEXRADLevel2Archive"
 	nexradChunkTopicARN   = "arn:aws:sns:us-east-1:684042711724:NewNEXRADLevel2ObjectFilterable"
 )
 
