@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,6 +28,26 @@ const (
 	nexradChunkTopicARN   = "arn:aws:sns:us-east-1:684042711724:NewNEXRADLevel2ObjectFilterable"
 )
 
+const (
+	// SQS caps long polling at 20 seconds. Every second below that multiplies
+	// the number of empty receives, and every empty receive is billed.
+	receiveWaitSeconds = 20
+	receiveBatchSize   = 10
+
+	// Backoff between consecutive ReceiveMessage failures. Without it a queue
+	// that has gone away, or credentials that have expired, spin the poll loop
+	// at network speed.
+	pollRetryBase = 1 * time.Second
+	pollRetryMax  = 30 * time.Second
+
+	// How long teardown may take after the poll context is cancelled.
+	shutdownTimeout = 15 * time.Second
+
+	// Neither topic publishes for this site, so it is what an empty
+	// subscription list renders to: a filter that matches nothing.
+	noSite = "nonsense"
+)
+
 type Listener struct {
 	eventChan                    chan events.Event
 	archiveSites                 *xsync.MapOf[string, uint]
@@ -39,203 +61,263 @@ type Listener struct {
 	chunkQueueURL                string
 	nexradChunkSubscriptionARN   string
 	nexradArchiveSubscriptionARN string
-	running                      atomic.Bool
+	// Cancels the poll context, so a 20-second long poll does not hold
+	// shutdown open for its full duration.
+	cancel  context.CancelFunc
+	running atomic.Bool
 }
 
-func (l *Listener) ensureChunkQueue() error {
-	resp, err := l.awsSqs.GetQueueUrl(context.TODO(), &sqs.GetQueueUrlInput{
-		QueueName: aws.String(l.chunkQueueName),
+// ensureQueue finds or creates one queue, returning its URL.
+func (l *Listener) ensureQueue(ctx context.Context, name string) (string, error) {
+	resp, err := l.awsSqs.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+		QueueName: aws.String(name),
+	})
+	if err == nil {
+		return *resp.QueueUrl, nil
+	}
+	// Queue does not exist, create it. The queue-level wait matches the
+	// per-request one so a future caller cannot silently short-poll.
+	created, err := l.awsSqs.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName: aws.String(name),
+		Attributes: map[string]string{
+			"ReceiveMessageWaitTimeSeconds": strconv.Itoa(receiveWaitSeconds),
+		},
 	})
 	if err != nil {
-		// Queue does not exist, create it
-		resp, err := l.awsSqs.CreateQueue(context.TODO(), &sqs.CreateQueueInput{
-			QueueName: aws.String(l.chunkQueueName),
-		})
-		if err != nil {
-			return err
-		}
-		l.chunkQueueURL = *resp.QueueUrl
-	} else {
-		l.chunkQueueURL = *resp.QueueUrl
+		return "", err
 	}
-	return nil
+	return *created.QueueUrl, nil
 }
 
-func (l *Listener) ensureArchiveQueue() error {
-	resp, err := l.awsSqs.GetQueueUrl(context.TODO(), &sqs.GetQueueUrlInput{
-		QueueName: aws.String(l.archiveQueueName),
-	})
-	if err != nil {
-		// Queue does not exist, create it
-		resp, err := l.awsSqs.CreateQueue(context.TODO(), &sqs.CreateQueueInput{
-			QueueName: aws.String(l.archiveQueueName),
-		})
-		if err != nil {
-			return err
-		}
-		l.archiveQueueURL = *resp.QueueUrl
-	} else {
-		l.archiveQueueURL = *resp.QueueUrl
-	}
-	return nil
-}
-
-func (l *Listener) ensureArchiveSubscription() error {
-	callerID, err := l.awsSts.GetCallerIdentity(context.TODO(), &sts.GetCallerIdentityInput{})
+func (l *Listener) ensureChunkQueue(ctx context.Context) error {
+	url, err := l.ensureQueue(ctx, l.chunkQueueName)
 	if err != nil {
 		return err
 	}
-	sqsARN := fmt.Sprintf("arn:aws:sqs:us-east-1:%s:%s", *callerID.Account, l.archiveQueueName)
+	l.chunkQueueURL = url
+	return nil
+}
 
-	subs, err := l.awsSns.Subscribe(context.TODO(), &sns.SubscribeInput{
+func (l *Listener) ensureArchiveQueue(ctx context.Context) error {
+	url, err := l.ensureQueue(ctx, l.archiveQueueName)
+	if err != nil {
+		return err
+	}
+	l.archiveQueueURL = url
+	return nil
+}
+
+// sendMessagePolicy lets one SNS topic, and nothing else, write to one queue.
+func sendMessagePolicy(queueARN, topicARN string) string {
+	return fmt.Sprintf(`{
+		"Version": "2012-10-17",
+		"Statement": [
+			{
+				"Effect": "Allow",
+				"Principal": {
+					"AWS": "*"
+				},
+				"Action": "sqs:SendMessage",
+				"Resource": "%s",
+				"Condition": {
+					"ArnLike": {
+						"aws:SourceArn": "%s"
+					}
+				}
+			}
+		]
+	}`, queueARN, topicARN)
+}
+
+func (l *Listener) queueARN(ctx context.Context, queueName string) (string, error) {
+	callerID, err := l.awsSts.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("arn:aws:sqs:us-east-1:%s:%s", *callerID.Account, queueName), nil
+}
+
+// subscribedSites lists the stations with at least one live websocket, sorted
+// so an unchanged subscription set renders to an unchanged policy.
+func subscribedSites(m *xsync.MapOf[string, uint]) []string {
+	var sites []string
+	m.Range(func(key string, val uint) bool {
+		if val > 0 && !slices.Contains(sites, key) {
+			sites = append(sites, key)
+		}
+		return true
+	})
+	slices.Sort(sites)
+	return sites
+}
+
+// chunkFilterPolicy filters the chunk topic on the SiteID message attribute it
+// publishes.
+func chunkFilterPolicy(sites []string) (string, error) {
+	if len(sites) == 0 {
+		sites = []string{noSite}
+	}
+	jsonSites, err := json.Marshal(sites)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`{"SiteID": %s}`, jsonSites), nil
+}
+
+// archiveFilterPolicy filters the archive topic, which publishes raw S3 event
+// notifications carrying no message attributes at all, so the match has to be
+// made against the message body.
+//
+// The object key is `YYYY/MM/DD/SITE/SITE<timestamp>_V06`, so the leading date
+// rules out a prefix match on the site; `wildcard` matches the site wherever
+// the date puts it, and needs no rewrite when the date rolls over.
+func archiveFilterPolicy(sites []string) (string, error) {
+	if len(sites) == 0 {
+		sites = []string{noSite}
+	}
+	patterns := make([]map[string]string, 0, len(sites))
+	for _, site := range sites {
+		patterns = append(patterns, map[string]string{"wildcard": "*/" + site + "/*"})
+	}
+	policy := map[string]any{
+		"Records": map[string]any{
+			"s3":        map[string]any{"object": map[string]any{"key": patterns}},
+			"eventName": []map[string]string{{"prefix": "ObjectCreated:"}},
+		},
+	}
+	out, err := json.Marshal(policy)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func (l *Listener) updateChunkFilterPolicy(ctx context.Context) error {
+	policy, err := chunkFilterPolicy(subscribedSites(l.chunkSites))
+	if err != nil {
+		return err
+	}
+	_, err = l.awsSns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
+		SubscriptionArn: aws.String(l.nexradChunkSubscriptionARN),
+		AttributeName:   aws.String("FilterPolicy"),
+		AttributeValue:  aws.String(policy),
+	})
+	return err
+}
+
+func (l *Listener) updateArchiveFilterPolicy(ctx context.Context) error {
+	policy, err := archiveFilterPolicy(subscribedSites(l.archiveSites))
+	if err != nil {
+		return err
+	}
+	_, err = l.awsSns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
+		SubscriptionArn: aws.String(l.nexradArchiveSubscriptionARN),
+		AttributeName:   aws.String("FilterPolicy"),
+		AttributeValue:  aws.String(policy),
+	})
+	return err
+}
+
+func (l *Listener) ensureArchiveSubscription(ctx context.Context) error {
+	sqsARN, err := l.queueARN(ctx, l.archiveQueueName)
+	if err != nil {
+		return err
+	}
+
+	policy, err := archiveFilterPolicy(nil)
+	if err != nil {
+		return err
+	}
+	subs, err := l.awsSns.Subscribe(ctx, &sns.SubscribeInput{
 		Protocol:              aws.String("sqs"),
 		TopicArn:              aws.String(nexradArchiveTopicARN),
 		Endpoint:              aws.String(sqsARN),
 		ReturnSubscriptionArn: true,
+		Attributes: map[string]string{
+			"FilterPolicyScope": "MessageBody",
+			"FilterPolicy":      policy,
+		},
 	})
 	if err != nil {
 		return err
 	}
 	l.nexradArchiveSubscriptionARN = *subs.SubscriptionArn
-	_, err = l.awsSqs.SetQueueAttributes(context.TODO(), &sqs.SetQueueAttributesInput{
+	_, err = l.awsSqs.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
 		QueueUrl: aws.String(l.archiveQueueURL),
 		Attributes: map[string]string{
-			"Policy": fmt.Sprintf(`{
-				"Version": "2012-10-17",
-				"Statement": [
-					{
-						"Effect": "Allow",
-						"Principal": {
-							"AWS": "*"
-						},
-						"Action": "sqs:SendMessage",
-						"Resource": "%s",
-						"Condition": {
-							"ArnLike": {
-								"aws:SourceArn": "%s"
-							}
-						}
-					}
-				]
-			}`, sqsARN, nexradArchiveTopicARN),
+			"Policy": sendMessagePolicy(sqsARN, nexradArchiveTopicARN),
 		},
 	})
 	return err
 }
 
-func (l *Listener) updateFilterPolicy(ctx context.Context) error {
-	var sites []string
-	l.chunkSites.Range(func(key string, val uint) bool {
-		if !slices.Contains(sites, key) && val > 0 {
-			sites = append(sites, key)
-		}
-		return true
-	})
-
-	if len(sites) == 0 {
-		sites = []string{"nonsense"}
-	}
-	jsonSites, err := json.Marshal(sites)
+func (l *Listener) ensureChunkSubscription(ctx context.Context) error {
+	sqsARN, err := l.queueARN(ctx, l.chunkQueueName)
 	if err != nil {
 		return err
 	}
 
-	filterPolicy := fmt.Sprintf(`{
-		"SiteID": %s
-	}`, jsonSites)
-
-	_, err = l.awsSns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
-		SubscriptionArn: aws.String(l.nexradChunkSubscriptionARN),
-		AttributeName:   aws.String("FilterPolicy"),
-		AttributeValue:  aws.String(filterPolicy),
-	})
-
-	return err
-}
-
-func (l *Listener) ensureChunkSubscription() error {
-	callerID, err := l.awsSts.GetCallerIdentity(context.TODO(), &sts.GetCallerIdentityInput{})
+	policy, err := chunkFilterPolicy(nil)
 	if err != nil {
 		return err
 	}
-	sqsARN := fmt.Sprintf("arn:aws:sqs:us-east-1:%s:%s", *callerID.Account, l.chunkQueueName)
-
-	subs, err := l.awsSns.Subscribe(context.TODO(), &sns.SubscribeInput{
+	subs, err := l.awsSns.Subscribe(ctx, &sns.SubscribeInput{
 		Protocol:              aws.String("sqs"),
 		TopicArn:              aws.String(nexradChunkTopicARN),
 		Endpoint:              aws.String(sqsARN),
 		ReturnSubscriptionArn: true,
 		Attributes: map[string]string{
-			"FilterPolicy": `{
-				"SiteID": ["nonsense"]
-			}`,
+			"FilterPolicy": policy,
 		},
 	})
 	if err != nil {
 		return err
 	}
 	l.nexradChunkSubscriptionARN = *subs.SubscriptionArn
-	_, err = l.awsSqs.SetQueueAttributes(context.TODO(), &sqs.SetQueueAttributesInput{
+	_, err = l.awsSqs.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{
 		QueueUrl: aws.String(l.chunkQueueURL),
 		Attributes: map[string]string{
-			"Policy": fmt.Sprintf(`{
-				"Version": "2012-10-17",
-				"Statement": [
-					{
-						"Effect": "Allow",
-						"Principal": {
-							"AWS": "*"
-						},
-						"Action": "sqs:SendMessage",
-						"Resource": "%s",
-						"Condition": {
-							"ArnLike": {
-								"aws:SourceArn": "%s"
-							}
-						}
-					}
-				]
-			}`, sqsARN, nexradChunkTopicARN),
+			"Policy": sendMessagePolicy(sqsARN, nexradChunkTopicARN),
 		},
 	})
 	return err
 }
 
-func (l *Listener) destroyArchiveSubscription() error {
+func (l *Listener) destroyArchiveSubscription(ctx context.Context) error {
 	if l.nexradArchiveSubscriptionARN == "" {
 		return nil
 	}
-	_, err := l.awsSns.Unsubscribe(context.TODO(), &sns.UnsubscribeInput{
+	_, err := l.awsSns.Unsubscribe(ctx, &sns.UnsubscribeInput{
 		SubscriptionArn: aws.String(l.nexradArchiveSubscriptionARN),
 	})
 	return err
 }
 
-func (l *Listener) destroyChunkSubscription() error {
+func (l *Listener) destroyChunkSubscription(ctx context.Context) error {
 	if l.nexradChunkSubscriptionARN == "" {
 		return nil
 	}
-	_, err := l.awsSns.Unsubscribe(context.TODO(), &sns.UnsubscribeInput{
+	_, err := l.awsSns.Unsubscribe(ctx, &sns.UnsubscribeInput{
 		SubscriptionArn: aws.String(l.nexradChunkSubscriptionARN),
 	})
 	return err
 }
 
-func (l *Listener) destroyArchiveQueue() error {
+func (l *Listener) destroyArchiveQueue(ctx context.Context) error {
 	if l.archiveQueueURL == "" {
 		return nil
 	}
-	_, err := l.awsSqs.DeleteQueue(context.TODO(), &sqs.DeleteQueueInput{
+	_, err := l.awsSqs.DeleteQueue(ctx, &sqs.DeleteQueueInput{
 		QueueUrl: aws.String(l.archiveQueueURL),
 	})
 	return err
 }
 
-func (l *Listener) destroyChunkQueue() error {
+func (l *Listener) destroyChunkQueue(ctx context.Context) error {
 	if l.chunkQueueURL == "" {
 		return nil
 	}
-	_, err := l.awsSqs.DeleteQueue(context.TODO(), &sqs.DeleteQueueInput{
+	_, err := l.awsSqs.DeleteQueue(ctx, &sqs.DeleteQueueInput{
 		QueueUrl: aws.String(l.chunkQueueURL),
 	})
 	return err
@@ -247,15 +329,7 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		return nil, err
 	}
 	svc := sqs.NewFromConfig(cfg)
-	cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"), config.WithRetryMode(aws.RetryModeStandard), config.WithRetryMaxAttempts(10))
-	if err != nil {
-		return nil, err
-	}
 	snsSvc := sns.NewFromConfig(cfg)
-	cfg, err = config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"), config.WithRetryMode(aws.RetryModeStandard), config.WithRetryMaxAttempts(10))
-	if err != nil {
-		return nil, err
-	}
 	stsSvc := sts.NewFromConfig(cfg)
 
 	archiveQueueUUID, err := uuid.NewV7()
@@ -267,6 +341,7 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		return nil, err
 	}
 
+	pollCtx, cancel := context.WithCancel(context.Background())
 	listener := &Listener{
 		eventChan:        eventChan,
 		archiveSites:     xsync.NewMapOf[string, uint](),
@@ -276,143 +351,162 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		awsSts:           stsSvc,
 		archiveQueueName: fmt.Sprintf("nexrad-aws-notifier-events-archive-%s", archiveQueueUUID.String()),
 		chunkQueueName:   fmt.Sprintf("nexrad-aws-notifier-events-chunk-%s", chunkQueueUUID.String()),
+		cancel:           cancel,
 		running:          atomic.Bool{},
 	}
 	listener.running.Store(true)
 
-	err = listener.ensureArchiveQueue()
-	if err != nil {
+	unwind := func(err error) (*Listener, error) {
+		cancel()
+		teardown, teardownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer teardownCancel()
+		_ = listener.destroyArchiveSubscription(teardown)
+		_ = listener.destroyChunkSubscription(teardown)
+		_ = listener.destroyArchiveQueue(teardown)
+		_ = listener.destroyChunkQueue(teardown)
 		return nil, err
 	}
 
-	err = listener.ensureChunkQueue()
-	if err != nil {
-		_ = listener.destroyArchiveQueue()
-		return nil, err
+	if err := listener.ensureArchiveQueue(pollCtx); err != nil {
+		return unwind(err)
+	}
+	if err := listener.ensureChunkQueue(pollCtx); err != nil {
+		return unwind(err)
+	}
+	if err := listener.ensureArchiveSubscription(pollCtx); err != nil {
+		return unwind(err)
+	}
+	if err := listener.ensureChunkSubscription(pollCtx); err != nil {
+		return unwind(err)
 	}
 
-	err = listener.ensureArchiveSubscription()
-	if err != nil {
-		_ = listener.destroyArchiveQueue()
-		_ = listener.destroyChunkQueue()
-		return nil, err
-	}
-
-	err = listener.ensureChunkSubscription()
-	if err != nil {
-		_ = listener.destroyArchiveQueue()
-		_ = listener.destroyChunkQueue()
-		_ = listener.destroyArchiveSubscription()
-		return nil, err
-	}
-
-	go listener.runArchive()
-	go listener.runChunk()
+	go listener.poll(pollCtx, "archive", listener.archiveQueueURL, listener.onArchiveMessage)
+	go listener.poll(pollCtx, "chunk", listener.chunkQueueURL, listener.onChunkMessage)
 
 	return listener, nil
 }
 
+// listen adds one reference to a station.
+func listen(m *xsync.MapOf[string, uint], station string) {
+	m.Compute(station, func(oldValue uint, _ bool) (uint, bool) {
+		return oldValue + 1, false
+	})
+}
+
+// unlisten drops one reference to a station, deleting the entry when the last
+// one goes. Decrementing an absent key would underflow uint, so an entry that
+// is not there is removed rather than written back.
+func unlisten(m *xsync.MapOf[string, uint], station string) {
+	m.Compute(station, func(oldValue uint, loaded bool) (uint, bool) {
+		if !loaded || oldValue <= 1 {
+			return 0, true
+		}
+		return oldValue - 1, false
+	})
+}
+
 func (l *Listener) ListenChunk(ctx context.Context, station string) error {
-	station = strings.ToUpper(station)
-	num, loaded := l.chunkSites.LoadOrStore(station, 1)
-	if loaded {
-		l.chunkSites.Store(station, num+1)
-	}
-	return l.updateFilterPolicy(ctx)
+	listen(l.chunkSites, strings.ToUpper(station))
+	return l.updateChunkFilterPolicy(ctx)
 }
 
 func (l *Listener) ListenArchive(ctx context.Context, station string) error {
-	station = strings.ToUpper(station)
-	num, loaded := l.archiveSites.LoadOrStore(station, 1)
-	if loaded {
-		l.archiveSites.Store(station, num+1)
-	}
-	return l.updateFilterPolicy(ctx)
+	listen(l.archiveSites, strings.ToUpper(station))
+	return l.updateArchiveFilterPolicy(ctx)
 }
 
 func (l *Listener) UnlistenArchive(ctx context.Context, station string) error {
-	station = strings.ToUpper(station)
-	num, loaded := l.archiveSites.LoadOrStore(station, 0)
-	if loaded {
-		l.archiveSites.Store(station, num-1)
-	}
-	if num-1 == 0 {
-		l.archiveSites.Delete(station)
-	}
-	return l.updateFilterPolicy(ctx)
+	unlisten(l.archiveSites, strings.ToUpper(station))
+	return l.updateArchiveFilterPolicy(ctx)
 }
 
 func (l *Listener) UnlistenChunk(ctx context.Context, station string) error {
-	station = strings.ToUpper(station)
-	num, loaded := l.chunkSites.LoadOrStore(station, 0)
-	if loaded {
-		l.chunkSites.Store(station, num-1)
-	}
-	if num-1 == 0 {
-		l.chunkSites.Delete(station)
-	}
-	return l.updateFilterPolicy(ctx)
+	unlisten(l.chunkSites, strings.ToUpper(station))
+	return l.updateChunkFilterPolicy(ctx)
 }
 
-func (l *Listener) runArchive() {
-	// Loop and poll the SQS queue
+// pollBackoff grows with consecutive receive failures, to a ceiling.
+func pollBackoff(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	delay := pollRetryBase
+	for i := 1; i < failures; i++ {
+		delay *= 2
+		if delay >= pollRetryMax {
+			return pollRetryMax
+		}
+	}
+	return delay
+}
+
+// wait sleeps for d, or returns false as soon as the listener is stopping.
+func wait(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// poll drains one queue until the listener stops. Both feeds have identical
+// mechanics; only the queue and the per-message handler differ.
+func (l *Listener) poll(ctx context.Context, name string, queueURL string, onMessage func(types.Message)) {
+	failures := 0
 	for l.running.Load() {
-		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(l.archiveQueueURL),
-			MaxNumberOfMessages: 10,
-			WaitTimeSeconds:     2,
+		resp, err := l.awsSqs.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl:            aws.String(queueURL),
+			MaxNumberOfMessages: receiveBatchSize,
+			WaitTimeSeconds:     receiveWaitSeconds,
 		})
 		// Break early since it's likely the listener will stop
 		// while waiting for messages
 		if !l.running.Load() {
-			break
+			return
 		}
 		if err != nil {
-			slog.Warn("Error receiving message:", "error", err)
+			failures++
+			delay := pollBackoff(failures)
+			slog.Warn("Error receiving message:", "queue", name, "error", err, "retryIn", delay)
+			if !wait(ctx, delay) {
+				return
+			}
 			continue
 		}
+		failures = 0
+		if len(resp.Messages) == 0 {
+			continue
+		}
+		l.deleteMessages(ctx, name, queueURL, resp.Messages)
 		for _, msg := range resp.Messages {
-			// Delete the message
-			_, err := l.awsSqs.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
-				QueueUrl:      aws.String(l.archiveQueueURL),
-				ReceiptHandle: msg.ReceiptHandle,
-			})
-			if err != nil {
-				slog.Warn("Error deleting message:", "error", err)
-			}
-			go l.onArchiveMessage(msg)
+			go onMessage(msg)
 		}
 	}
 }
 
-func (l *Listener) runChunk() {
-	// Loop and poll the SQS queue
-	for l.running.Load() {
-		resp, err := l.awsSqs.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(l.chunkQueueURL),
-			MaxNumberOfMessages: 10,
-			WaitTimeSeconds:     2,
+// deleteMessages removes a whole receive in one request, where deleting each
+// message on its own cost one billable request per message.
+func (l *Listener) deleteMessages(ctx context.Context, name string, queueURL string, msgs []types.Message) {
+	entries := make([]types.DeleteMessageBatchRequestEntry, 0, len(msgs))
+	for i, msg := range msgs {
+		entries = append(entries, types.DeleteMessageBatchRequestEntry{
+			Id:            aws.String(strconv.Itoa(i)),
+			ReceiptHandle: msg.ReceiptHandle,
 		})
-		// Break early since it's likely the listener will stop
-		// while waiting for messages
-		if !l.running.Load() {
-			break
-		}
-		if err != nil {
-			slog.Warn("Error receiving message:", "error", err)
-			continue
-		}
-		for _, msg := range resp.Messages {
-			// Delete the message
-			_, err := l.awsSqs.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
-				QueueUrl:      aws.String(l.chunkQueueURL),
-				ReceiptHandle: msg.ReceiptHandle,
-			})
-			if err != nil {
-				slog.Warn("Error deleting message:", "error", err)
-			}
-			go l.onChunkMessage(msg)
-		}
+	}
+	resp, err := l.awsSqs.DeleteMessageBatch(ctx, &sqs.DeleteMessageBatchInput{
+		QueueUrl: aws.String(queueURL),
+		Entries:  entries,
+	})
+	if err != nil {
+		slog.Warn("Error deleting messages:", "queue", name, "count", len(entries), "error", err)
+		return
+	}
+	for _, failed := range resp.Failed {
+		slog.Warn("Error deleting message:", "queue", name, "code", aws.ToString(failed.Code), "reason", aws.ToString(failed.Message))
 	}
 }
 
@@ -492,19 +586,26 @@ func (l *Listener) onChunkMessage(msg types.Message) {
 
 func (l *Listener) Stop() error {
 	l.running.Store(false)
+	// Cancels the in-flight long poll, which would otherwise hold shutdown open
+	// for the rest of its 20 seconds.
+	l.cancel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
 	errGrp := errgroup.Group{}
-	errGrp.SetLimit(2)
+	errGrp.SetLimit(4)
 	errGrp.Go(func() error {
-		return l.destroyChunkSubscription()
+		return l.destroyChunkSubscription(ctx)
 	})
 	errGrp.Go(func() error {
-		return l.destroyArchiveSubscription()
+		return l.destroyArchiveSubscription(ctx)
 	})
 	errGrp.Go(func() error {
-		return l.destroyChunkQueue()
+		return l.destroyChunkQueue(ctx)
 	})
 	errGrp.Go(func() error {
-		return l.destroyArchiveQueue()
+		return l.destroyArchiveQueue(ctx)
 	})
 	return errGrp.Wait()
 }
