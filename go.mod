@@ -1,6 +1,6 @@
 module github.com/USA-RedDragon/nexrad-aws-notifier
 
-go 1.22.6
+go 1.25.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.31.0
@@ -20,7 +20,7 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.55.0
 	go.opentelemetry.io/otel v1.30.0
 	go.opentelemetry.io/otel/trace v1.30.0
-	golang.org/x/sync v0.8.0
+	golang.org/x/sync v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
