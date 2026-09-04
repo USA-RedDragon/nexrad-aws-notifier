@@ -15,7 +15,7 @@ require (
 	github.com/prometheus/client_golang v1.20.4
 	github.com/puzpuzpuz/xsync/v3 v3.4.0
 	github.com/spf13/cobra v1.8.1
-	github.com/spf13/pflag v1.0.5
+	github.com/spf13/pflag v1.0.10
 	github.com/ztrue/shutdown v0.1.1
 	go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin v0.55.0
 	go.opentelemetry.io/otel v1.30.0
