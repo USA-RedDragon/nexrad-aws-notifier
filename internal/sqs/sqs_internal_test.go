@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v3"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 func sites() *xsync.MapOf[string, uint] {
