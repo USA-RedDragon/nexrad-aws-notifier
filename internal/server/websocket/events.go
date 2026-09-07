@@ -119,20 +119,27 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 	c.messageType = messageType
 	c.station = station
 
+	var subscribeErr error
 	switch messageType {
 	case events.EventTypeNexradChunk:
-		if err := sqsListener.ListenChunk(ctx, station); err != nil {
-			return fmt.Errorf("failed to listen for chunk events: %w", err)
-		}
+		subscribeErr = sqsListener.ListenChunk(ctx, station)
 	case events.EventTypeNexradArchive:
-		if err := sqsListener.ListenArchive(ctx, station); err != nil {
-			return fmt.Errorf("failed to listen for archive events: %w", err)
-		}
+		subscribeErr = sqsListener.ListenArchive(ctx, station)
 	default:
 		return fmt.Errorf("unknown event type %q", messageType)
 	}
-	// Only now is an Unlisten owed, so only now may OnDisconnect do work.
+	// The station is registered by now whether or not the call that follows it
+	// succeeded, so an Unlisten is owed either way.
 	c.subscribed = true
+	if subscribeErr != nil {
+		// What fails here is the filter policy that narrows the topic to this
+		// station, not the subscription. Closing the websocket over it turns a
+		// widened filter into a client that cannot connect at all, and the
+		// client reconnects straight back into the same failure. The refcount
+		// stands, so the periodic refresh puts the station back in the policy.
+		slog.Warn("Subscribed, but the filter policy did not take; this station's notifications will lag until it does",
+			"error", subscribeErr, "type", messageType, "station", station)
+	}
 
 	slog.Info("New websocket connection", "type", messageType, "station", station)
 

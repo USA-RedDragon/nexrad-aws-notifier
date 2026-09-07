@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -46,6 +47,18 @@ const (
 	// Neither topic publishes for this site, so it is what an empty
 	// subscription list renders to: a filter that matches nothing.
 	noSite = "nonsense"
+
+	// Most values the archive body filter may carry. SNS caps a filter policy
+	// at 150 combinations and counts nesting depth toward it, so the documented
+	// 150 is not the budget a policy four levels down actually gets. Measured
+	// against live SNS: 36 values accepted, 40 refused with "Filter policy is
+	// too complex".
+	maxArchiveFilterValues = 36
+
+	// How often the archive policy is rewritten. It names dates, so it goes
+	// stale on its own; this also retries one a transient SNS failure left
+	// behind.
+	archiveFilterRefresh = 15 * time.Minute
 )
 
 type Listener struct {
@@ -61,6 +74,11 @@ type Listener struct {
 	chunkQueueURL                string
 	nexradChunkSubscriptionARN   string
 	nexradArchiveSubscriptionARN string
+	// Reading the subscribed set and writing the policy it renders to has to be
+	// one step. Two connects landing together would otherwise race, and the one
+	// that computed the older set could be the one that writes last.
+	archiveFilterMu sync.Mutex
+	chunkFilterMu   sync.Mutex
 	// Cancels the poll context, so a 20-second long poll does not hold
 	// shutdown open for its full duration.
 	cancel  context.CancelFunc
@@ -168,31 +186,63 @@ func chunkFilterPolicy(sites []string) (string, error) {
 // notifications carrying no message attributes at all, so the match has to be
 // made against the message body.
 //
-// The object key is `YYYY/MM/DD/SITE/SITE<timestamp>_V06`, so the leading date
-// rules out a prefix match on the site; `wildcard` matches the site wherever
-// the date puts it, and needs no rewrite when the date rolls over.
-func archiveFilterPolicy(sites []string) (string, error) {
+// The object key is `YYYY/MM/DD/SITE/SITE<timestamp>_V06`. Matching the site
+// with a wildcard (`*/SITE/*`) is the obvious spelling and works for a handful
+// of sites, but SNS scores wildcard complexity across the whole policy and
+// refuses it outright from the fifth site on ("Wildcard complexity too high",
+// measured: four accepted, five refused). That refusal fails the
+// SetSubscriptionAttributes, and so the websocket connect that triggered it.
+//
+// Prefixes carry no such budget, so the date is spelled out instead. Two days
+// are named -- the current UTC day and the next -- so a volume filed either
+// side of the roll matches without waiting for the next refresh.
+//
+// Returns the number of sites that would not fit, so the caller can say so.
+func archiveFilterPolicy(sites []string, now time.Time) (string, int, error) {
 	if len(sites) == 0 {
 		sites = []string{noSite}
 	}
-	patterns := make([]map[string]string, 0, len(sites))
-	for _, site := range sites {
-		patterns = append(patterns, map[string]string{"wildcard": "*/" + site + "/*"})
+
+	// Naming both days doubles the values, so give that up before giving up a
+	// site: a stale date costs latency until the next refresh, a dropped site
+	// costs every notification.
+	days := 2
+	if len(sites)*days > maxArchiveFilterValues {
+		days = 1
 	}
+	dropped := 0
+	if len(sites) > maxArchiveFilterValues {
+		dropped = len(sites) - maxArchiveFilterValues
+		sites = sites[:maxArchiveFilterValues]
+	}
+
+	prefixes := make([]map[string]string, 0, len(sites)*days)
+	for _, site := range sites {
+		for day := range days {
+			date := now.UTC().AddDate(0, 0, day).Format("2006/01/02")
+			prefixes = append(prefixes, map[string]string{"prefix": date + "/" + site + "/"})
+		}
+	}
+
+	// Only the key is matched. An `eventName` clause alongside it reads as
+	// harmless but multiplies the combination count, which halves how many
+	// sites fit; the archive bucket only ever gains objects.
 	policy := map[string]any{
 		"Records": map[string]any{
-			"s3":        map[string]any{"object": map[string]any{"key": patterns}},
-			"eventName": []map[string]string{{"prefix": "ObjectCreated:"}},
+			"s3": map[string]any{"object": map[string]any{"key": prefixes}},
 		},
 	}
 	out, err := json.Marshal(policy)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return string(out), nil
+	return string(out), dropped, nil
 }
 
 func (l *Listener) updateChunkFilterPolicy(ctx context.Context) error {
+	l.chunkFilterMu.Lock()
+	defer l.chunkFilterMu.Unlock()
+
 	policy, err := chunkFilterPolicy(subscribedSites(l.chunkSites))
 	if err != nil {
 		return err
@@ -206,9 +256,16 @@ func (l *Listener) updateChunkFilterPolicy(ctx context.Context) error {
 }
 
 func (l *Listener) updateArchiveFilterPolicy(ctx context.Context) error {
-	policy, err := archiveFilterPolicy(subscribedSites(l.archiveSites))
+	l.archiveFilterMu.Lock()
+	defer l.archiveFilterMu.Unlock()
+
+	policy, dropped, err := archiveFilterPolicy(subscribedSites(l.archiveSites), time.Now())
 	if err != nil {
 		return err
+	}
+	if dropped > 0 {
+		slog.Warn("Too many archive sites to filter on; the rest will not be notified",
+			"dropped", dropped, "limit", maxArchiveFilterValues)
 	}
 	_, err = l.awsSns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
 		SubscriptionArn: aws.String(l.nexradArchiveSubscriptionARN),
@@ -224,7 +281,7 @@ func (l *Listener) ensureArchiveSubscription(ctx context.Context) error {
 		return err
 	}
 
-	policy, err := archiveFilterPolicy(nil)
+	policy, _, err := archiveFilterPolicy(nil, time.Now())
 	if err != nil {
 		return err
 	}
@@ -380,10 +437,31 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		return unwind(err)
 	}
 
+	go listener.refreshArchiveFilter(pollCtx)
 	go listener.poll(pollCtx, "archive", listener.archiveQueueURL, listener.onArchiveMessage)
 	go listener.poll(pollCtx, "chunk", listener.chunkQueueURL, listener.onChunkMessage)
 
 	return listener, nil
+}
+
+// refreshArchiveFilter keeps the dates in the archive policy current, and
+// retries one that a transient SNS failure left stale.
+func (l *Listener) refreshArchiveFilter(ctx context.Context) {
+	ticker := time.NewTicker(archiveFilterRefresh)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if len(subscribedSites(l.archiveSites)) == 0 {
+				continue
+			}
+			if err := l.updateArchiveFilterPolicy(ctx); err != nil {
+				slog.Warn("Error refreshing archive filter policy:", "error", err)
+			}
+		}
+	}
 }
 
 // listen adds one reference to a station.

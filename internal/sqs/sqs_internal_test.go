@@ -1,6 +1,7 @@
 package sqs
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -101,55 +102,126 @@ func TestChunkFilterPolicy(t *testing.T) {
 }
 
 // The archive topic publishes raw S3 events with no message attributes, so this
-// policy is matched against the body. The exact shape below is the one verified
-// against live SNS: `Records` written as though it were an object, and a
-// wildcard rather than a prefix because the key begins with the date.
+// policy is matched against the body, and the object key is the only field that
+// names the site.
 func TestArchiveFilterPolicy(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name  string
-		sites []string
-		want  string
-	}{
-		{
-			"no sites matches nothing",
-			nil,
-			`{"Records":{"eventName":[{"prefix":"ObjectCreated:"}],"s3":{"object":{"key":[{"wildcard":"*/nonsense/*"}]}}}}`,
-		},
-		{
-			"one site",
-			[]string{"KTLX"},
-			`{"Records":{"eventName":[{"prefix":"ObjectCreated:"}],"s3":{"object":{"key":[{"wildcard":"*/KTLX/*"}]}}}}`,
-		},
-		{
-			"many sites",
-			[]string{"KABC", "KTLX"},
-			`{"Records":{"eventName":[{"prefix":"ObjectCreated:"}],"s3":{"object":{"key":[{"wildcard":"*/KABC/*"},{"wildcard":"*/KTLX/*"}]}}}}`,
-		},
-	} {
-		got, err := archiveFilterPolicy(tc.sites)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
-		}
-		if got != tc.want {
-			t.Errorf("%s:\n got %s\nwant %s", tc.name, got, tc.want)
+	now := time.Date(2026, 9, 7, 23, 42, 0, 0, time.UTC)
+
+	got, dropped, err := archiveFilterPolicy([]string{"KTLX"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 0 {
+		t.Fatalf("one site should fit, dropped %d", dropped)
+	}
+	want := `{"Records":{"s3":{"object":{"key":[` +
+		`{"prefix":"2026/09/07/KTLX/"},{"prefix":"2026/09/08/KTLX/"}]}}}}`
+	if got != want {
+		t.Errorf("\n got %s\nwant %s", got, want)
+	}
+
+	// An empty subscription list must still match nothing.
+	got, _, err = archiveFilterPolicy(nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "/nonsense/") {
+		t.Errorf("no sites should render a filter that matches nothing, got %s", got)
+	}
+}
+
+// The next UTC day is named alongside the current one so a volume filed either
+// side of midnight matches without waiting for the refresh to come round.
+func TestArchiveFilterPolicyStraddlesTheDateRoll(t *testing.T) {
+	t.Parallel()
+	got, _, err := archiveFilterPolicy(
+		[]string{"KTLX"}, time.Date(2026, 12, 31, 23, 59, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, date := range []string{"2026/12/31/KTLX/", "2027/01/01/KTLX/"} {
+		if !strings.Contains(got, date) {
+			t.Errorf("policy should name %s, got %s", date, got)
 		}
 	}
 }
 
-// A site must never be spelled into the policy as a bare prefix: the object key
-// is `YYYY/MM/DD/SITE/...`, so a prefix on the site matches nothing at all.
-func TestArchiveFilterPolicyDoesNotPrefixTheSite(t *testing.T) {
+// The defect this replaced: `*/SITE/*` is two wildcards, SNS scores wildcard
+// complexity across the whole policy, and it refused the write from the fifth
+// site on -- which failed the websocket connect that triggered it.
+func TestArchiveFilterPolicyUsesNoWildcards(t *testing.T) {
 	t.Parallel()
-	got, err := archiveFilterPolicy([]string{"KTLX"})
+	sites := make([]string, 0, 40)
+	for i := range 40 {
+		sites = append(sites, fmt.Sprintf("K%03d", i))
+	}
+	for _, n := range []int{1, 4, 5, 6, 12, 18, 19, 40} {
+		got, _, err := archiveFilterPolicy(sites[:n], time.Now())
+		if err != nil {
+			t.Fatalf("%d sites: %v", n, err)
+		}
+		if strings.Contains(got, "wildcard") || strings.Contains(got, "*") {
+			t.Errorf("%d sites: policy contains a wildcard, which SNS refuses in bulk: %s", n, got)
+		}
+	}
+}
+
+// A policy SNS will refuse is worse than a wide one: the write fails, so the
+// filter keeps whatever it had. Measured against live SNS -- 36 values
+// accepted, 40 refused as "Filter policy is too complex".
+func TestArchiveFilterPolicyStaysInsideWhatSNSAccepts(t *testing.T) {
+	t.Parallel()
+	sites := make([]string, 0, 200)
+	for i := range 200 {
+		sites = append(sites, fmt.Sprintf("K%03d", i))
+	}
+	for _, n := range []int{1, 6, 17, 18, 19, 36, 37, 100, 200} {
+		policy, dropped, err := archiveFilterPolicy(sites[:n], time.Now())
+		if err != nil {
+			t.Fatalf("%d sites: %v", n, err)
+		}
+		values := strings.Count(policy, `{"prefix":`)
+		if values > maxArchiveFilterValues {
+			t.Errorf("%d sites rendered %d values, over the %d SNS accepts",
+				n, values, maxArchiveFilterValues)
+		}
+		if n <= maxArchiveFilterValues && dropped != 0 {
+			t.Errorf("%d sites fit in %d values but %d were dropped", n, values, dropped)
+		}
+		if n > maxArchiveFilterValues && dropped != n-maxArchiveFilterValues {
+			t.Errorf("%d sites: dropped %d, want %d", n, dropped, n-maxArchiveFilterValues)
+		}
+	}
+}
+
+// Both days are given up before any site is: a stale date costs latency until
+// the next refresh, a dropped site costs every notification.
+func TestArchiveFilterPolicyGivesUpTheSecondDayBeforeASite(t *testing.T) {
+	t.Parallel()
+	sites := make([]string, 0, 30)
+	for i := range 30 {
+		sites = append(sites, fmt.Sprintf("K%03d", i))
+	}
+	// 18 sites x 2 days = 36, exactly what fits.
+	policy, dropped, err := archiveFilterPolicy(sites[:18], time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"wildcard":"*/KTLX/*"}`; !strings.Contains(got, want) {
-		t.Fatalf("policy should match the site by wildcard, got %s", got)
+	if dropped != 0 || strings.Count(policy, `{"prefix":`) != 36 {
+		t.Errorf("18 sites should fit as 36 values, got %d values and %d dropped",
+			strings.Count(policy, `{"prefix":`), dropped)
 	}
-	if bad := `{"prefix":"KTLX`; strings.Contains(got, bad) {
-		t.Fatalf("policy prefixes the site, which can never match: %s", got)
+	// 19 would be 38, so the second day goes rather than a site.
+	policy, dropped, err = archiveFilterPolicy(sites[:19], time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 0 {
+		t.Errorf("19 sites should still all be named, dropped %d", dropped)
+	}
+	if got := strings.Count(policy, `{"prefix":`); got != 19 {
+		t.Errorf("19 sites should fall back to one day each, got %d values", got)
 	}
 }
 
