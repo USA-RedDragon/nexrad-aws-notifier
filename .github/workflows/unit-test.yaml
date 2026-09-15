@@ -30,7 +30,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::803205869942:role/nexrad-aws-notifier
           aws-region: us-east-1
