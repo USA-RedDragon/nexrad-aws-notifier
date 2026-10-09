@@ -1,6 +1,4 @@
-run:
-  timeout: 30m
-
+version: "2"
 linters:
   enable:
     - asasalint
@@ -16,9 +14,7 @@ linters:
     - errname
     - errorlint
     - exhaustive
-    - exportloopref
     - forcetypeassert
-    - gci
     - gocheckcompilerdirectives
     - gochecknoglobals
     - gochecknoinits
@@ -26,7 +22,6 @@ linters:
     - gocritic
     - gocyclo
     - godox
-    - gofmt
     - goheader
     - gomoddirectives
     - gosec
@@ -49,3 +44,26 @@ linters:
     - usestdlibvars
     - wastedassign
     - whitespace
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - .*_configulator\.go$
+formatters:
+  enable:
+    - gci
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - .*_configulator\.go$

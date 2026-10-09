@@ -11,6 +11,16 @@ import (
 	"github.com/spf13/pflag"
 )
 
+const (
+	ipv4Host        = "10.0.0.1"
+	ipv6Host        = "fd00::1"
+	metricsIPV4Host = "10.0.0.2"
+	metricsIPV6Host = "fd00::2"
+	otlpEndpoint    = "collector:4317"
+	corsHost        = "example.com"
+	enabled         = "true"
+)
+
 const everyKey = `http:
   ipv4_host: 10.0.0.1
   ipv6_host: fd00::1
@@ -54,15 +64,15 @@ func TestFileLoadsEveryDocumentedKey(t *testing.T) {
 		key       string
 		got, want any
 	}{
-		{"http.ipv4_host", h.IPV4Host, "10.0.0.1"},
-		{"http.ipv6_host", h.IPV6Host, "fd00::1"},
+		{"http.ipv4_host", h.IPV4Host, ipv4Host},
+		{"http.ipv6_host", h.IPV6Host, ipv6Host},
 		{"http.port", h.Port, uint16(9001)},
 		{"http.tracing.enabled", h.Tracing.Enabled, true},
-		{"http.tracing.otlp_endpoint", h.Tracing.OTLPEndpoint, "collector:4317"},
+		{"http.tracing.otlp_endpoint", h.Tracing.OTLPEndpoint, otlpEndpoint},
 		{"http.pprof.enabled", h.PProf.Enabled, true},
 		{"http.metrics.enabled", h.Metrics.Enabled, true},
-		{"http.metrics.ipv4_host", h.Metrics.IPV4Host, "10.0.0.2"},
-		{"http.metrics.ipv6_host", h.Metrics.IPV6Host, "fd00::2"},
+		{"http.metrics.ipv4_host", h.Metrics.IPV4Host, metricsIPV4Host},
+		{"http.metrics.ipv6_host", h.Metrics.IPV6Host, metricsIPV6Host},
 		{"http.metrics.port", h.Metrics.Port, uint16(9002)},
 	} {
 		if c.got != c.want {
@@ -72,36 +82,34 @@ func TestFileLoadsEveryDocumentedKey(t *testing.T) {
 	if !slices.Equal(h.TrustedProxies, []string{"10.0.0.0/8"}) {
 		t.Errorf("http.trusted_proxies = %v", h.TrustedProxies)
 	}
-	if !slices.Equal(h.CORSHosts, []string{"example.com"}) {
+	if !slices.Equal(h.CORSHosts, []string{corsHost}) {
 		t.Errorf("http.cors_hosts = %v", h.CORSHosts)
 	}
 }
 
 // The environment names predate the move to configulator and deployments set
 // them, so they have to stay exactly as they were.
-//
-//nolint:paralleltest
 func TestEnvironmentNames(t *testing.T) {
+	t.Parallel()
 	env := map[string]string{
-		"HTTP_IPV4_HOST":             "10.0.0.1",
-		"HTTP_IPV6_HOST":             "fd00::1",
+		"HTTP_IPV4_HOST":             ipv4Host,
+		"HTTP_IPV6_HOST":             ipv6Host,
 		"HTTP_PORT":                  "9001",
 		"HTTP_TRUSTED_PROXIES":       "10.0.0.0/8,192.168.0.0/16",
-		"HTTP_CORS_HOSTS":            "example.com",
-		"HTTP_TRACING_ENABLED":       "true",
-		"HTTP_TRACING_OTLP_ENDPOINT": "collector:4317",
-		"HTTP_PPROF_ENABLED":         "true",
-		"HTTP_METRICS_ENABLED":       "true",
-		"HTTP_METRICS_IPV4_HOST":     "10.0.0.2",
-		"HTTP_METRICS_IPV6_HOST":     "fd00::2",
+		"HTTP_CORS_HOSTS":            corsHost,
+		"HTTP_TRACING_ENABLED":       enabled,
+		"HTTP_TRACING_OTLP_ENDPOINT": otlpEndpoint,
+		"HTTP_PPROF_ENABLED":         enabled,
+		"HTTP_METRICS_ENABLED":       enabled,
+		"HTTP_METRICS_IPV4_HOST":     metricsIPV4Host,
+		"HTTP_METRICS_IPV6_HOST":     metricsIPV6Host,
 		"HTTP_METRICS_PORT":          "9002",
 	}
-	for k, v := range env {
-		t.Setenv(k, v)
-	}
-
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	loader := config.New(fs)
+	loader := config.New(fs).WithEnviron(func(k string) (string, bool) {
+		v, ok := env[k]
+		return v, ok
+	})
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -112,14 +120,14 @@ func TestEnvironmentNames(t *testing.T) {
 
 	h := cfg.HTTP
 	want := config.HTTP{
-		IPV4Host:       "10.0.0.1",
-		IPV6Host:       "fd00::1",
+		IPV4Host:       ipv4Host,
+		IPV6Host:       ipv6Host,
 		Port:           9001,
 		TrustedProxies: []string{"10.0.0.0/8", "192.168.0.0/16"},
-		CORSHosts:      []string{"example.com"},
-		Tracing:        config.Tracing{Enabled: true, OTLPEndpoint: "collector:4317"},
+		CORSHosts:      []string{corsHost},
+		Tracing:        config.Tracing{Enabled: true, OTLPEndpoint: otlpEndpoint},
 		PProf:          config.PProf{Enabled: true},
-		Metrics:        config.Metrics{Enabled: true, IPV4Host: "10.0.0.2", IPV6Host: "fd00::2", Port: 9002},
+		Metrics:        config.Metrics{Enabled: true, IPV4Host: metricsIPV4Host, IPV6Host: metricsIPV6Host, Port: 9002},
 	}
 	if !reflect.DeepEqual(h, want) {
 		t.Errorf("got  %+v\nwant %+v", h, want)

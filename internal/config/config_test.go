@@ -21,7 +21,7 @@ func TestTracing(t *testing.T) {
 	t.Parallel()
 	baseCmd := cmd.NewCommand("testing", "deadbeef")
 	// Avoid port conflict
-	baseCmd.SetArgs([]string{"--http.port", "8085", "--http.metrics.port", "8086", "--http.tracing.enabled", "true"})
+	baseCmd.SetArgs([]string{"--http.port", "8085", "--http.metrics.port", "8086", "--http.tracing.enabled", enabled})
 	err := baseCmd.Execute()
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)

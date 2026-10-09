@@ -79,12 +79,12 @@ func run(cmd *cobra.Command, config *config.Config, newListener listenerFactory)
 		return err
 	}
 
-	err = server.Start()
+	err = server.Start(cmd.Context())
 	if err != nil {
 		return errors.Join(fmt.Errorf("failed to start HTTP server: %w", err), teardown())
 	}
 
-	stop := func(sig os.Signal) {
+	stop := func(_ os.Signal) {
 		slog.Info("Shutting down")
 
 		err := teardown()

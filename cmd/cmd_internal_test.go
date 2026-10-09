@@ -15,7 +15,8 @@ import (
 // subscriptions per attempt, which a crash loop multiplies.
 func TestFailedStartTearsDownTheListener(t *testing.T) {
 	t.Parallel()
-	busy, err := net.Listen("tcp4", "0.0.0.0:0")
+	var lc net.ListenConfig
+	busy, err := lc.Listen(t.Context(), "tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

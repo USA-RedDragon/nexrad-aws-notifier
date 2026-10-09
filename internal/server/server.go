@@ -91,10 +91,11 @@ func NewServer(config *config.HTTP, eventsChannel chan events.Event, sqsListener
 	}
 }
 
-func (s *Server) Start() error {
+func (s *Server) Start(ctx context.Context) error {
+	var lc net.ListenConfig
 	waitGrp := sync.WaitGroup{}
 	if s.ipv4Server != nil {
-		ipv4Listener, err := net.Listen("tcp4", s.ipv4Server.Addr)
+		ipv4Listener, err := lc.Listen(ctx, "tcp4", s.ipv4Server.Addr)
 		if err != nil {
 			return err
 		}
@@ -108,7 +109,7 @@ func (s *Server) Start() error {
 	}
 
 	if s.ipv6Server != nil {
-		ipv6Listener, err := net.Listen("tcp6", s.ipv6Server.Addr)
+		ipv6Listener, err := lc.Listen(ctx, "tcp6", s.ipv6Server.Addr)
 		if err != nil {
 			return err
 		}
@@ -124,7 +125,7 @@ func (s *Server) Start() error {
 
 	if s.config.Metrics.Enabled {
 		if s.metricsIPV4Server != nil {
-			metricsIPV4Listener, err := net.Listen("tcp4", s.metricsIPV4Server.Addr)
+			metricsIPV4Listener, err := lc.Listen(ctx, "tcp4", s.metricsIPV4Server.Addr)
 			if err != nil {
 				return err
 			}
@@ -138,7 +139,7 @@ func (s *Server) Start() error {
 		}
 
 		if s.metricsIPV6Server != nil {
-			metricsIPV6Listener, err := net.Listen("tcp6", s.metricsIPV6Server.Addr)
+			metricsIPV6Listener, err := lc.Listen(ctx, "tcp6", s.metricsIPV6Server.Addr)
 			if err != nil {
 				return err
 			}

@@ -1,10 +1,13 @@
 package websocket
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
 )
+
+const kfcx = "KFCX"
 
 func newTestHub() *EventsHub {
 	return &EventsHub{subscribers: make(map[*EventsWebsocket]struct{})}
@@ -37,10 +40,10 @@ func received(t *testing.T, sub *EventsWebsocket) (events.Event, bool) {
 func TestBroadcastReachesEverySubscriber(t *testing.T) {
 	t.Parallel()
 	hub := newTestHub()
-	first := newTestSub(hub, events.EventTypeNexradChunk, "KFCX")
-	second := newTestSub(hub, events.EventTypeNexradChunk, "KFCX")
+	first := newTestSub(hub, events.EventTypeNexradChunk, kfcx)
+	second := newTestSub(hub, events.EventTypeNexradChunk, kfcx)
 
-	event := events.NexradChunkEvent{Station: "KFCX", Chunk: "1"}
+	event := events.NexradChunkEvent{Station: kfcx, Chunk: "1"}
 	hub.broadcast(event)
 
 	for name, sub := range map[string]*EventsWebsocket{"first": first, "second": second} {
@@ -65,16 +68,16 @@ func TestBroadcastFilters(t *testing.T) {
 		event       events.Event
 		want        bool
 	}{
-		{"matching chunk", events.EventTypeNexradChunk, "KFCX",
-			events.NexradChunkEvent{Station: "KFCX"}, true},
-		{"station is case insensitive", events.EventTypeNexradChunk, "kfcx",
-			events.NexradChunkEvent{Station: "KFCX"}, true},
-		{"wrong station", events.EventTypeNexradChunk, "KFCX",
+		{"matching chunk", events.EventTypeNexradChunk, kfcx,
+			events.NexradChunkEvent{Station: kfcx}, true},
+		{"station is case insensitive", events.EventTypeNexradChunk, strings.ToLower(kfcx),
+			events.NexradChunkEvent{Station: kfcx}, true},
+		{"wrong station", events.EventTypeNexradChunk, kfcx,
 			events.NexradChunkEvent{Station: "KTLX"}, false},
-		{"wrong type", events.EventTypeNexradArchive, "KFCX",
-			events.NexradChunkEvent{Station: "KFCX"}, false},
-		{"matching archive", events.EventTypeNexradArchive, "KFCX",
-			events.NexradArchiveEvent{Station: "KFCX"}, true},
+		{"wrong type", events.EventTypeNexradArchive, kfcx,
+			events.NexradChunkEvent{Station: kfcx}, false},
+		{"matching archive", events.EventTypeNexradArchive, kfcx,
+			events.NexradArchiveEvent{Station: kfcx}, true},
 	}
 
 	for _, tt := range tests {
@@ -94,11 +97,11 @@ func TestBroadcastFilters(t *testing.T) {
 func TestBroadcastDropsForSlowSubscriber(t *testing.T) {
 	t.Parallel()
 	hub := newTestHub()
-	slow := newTestSub(hub, events.EventTypeNexradChunk, "KFCX")
-	fast := newTestSub(hub, events.EventTypeNexradChunk, "KFCX")
+	slow := newTestSub(hub, events.EventTypeNexradChunk, kfcx)
+	fast := newTestSub(hub, events.EventTypeNexradChunk, kfcx)
 
 	for range subscriberBuffer + 5 {
-		hub.broadcast(events.NexradChunkEvent{Station: "KFCX"})
+		hub.broadcast(events.NexradChunkEvent{Station: kfcx})
 		// Keep one subscriber drained so only the other overflows.
 		<-fast.events
 	}
@@ -115,10 +118,10 @@ func TestBroadcastDropsForSlowSubscriber(t *testing.T) {
 func TestRemoveStopsDelivery(t *testing.T) {
 	t.Parallel()
 	hub := newTestHub()
-	sub := newTestSub(hub, events.EventTypeNexradChunk, "KFCX")
+	sub := newTestSub(hub, events.EventTypeNexradChunk, kfcx)
 
 	hub.remove(sub)
-	hub.broadcast(events.NexradChunkEvent{Station: "KFCX"})
+	hub.broadcast(events.NexradChunkEvent{Station: kfcx})
 
 	if _, ok := received(t, sub); ok {
 		t.Error("removed subscriber still received an event")

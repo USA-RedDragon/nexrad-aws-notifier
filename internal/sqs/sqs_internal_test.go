@@ -9,6 +9,8 @@ import (
 	"github.com/puzpuzpuz/xsync/v3"
 )
 
+const ktlx = "KTLX"
+
 func sites() *xsync.MapOf[string, uint] {
 	return xsync.NewMapOf[string, uint]()
 }
@@ -17,22 +19,22 @@ func TestListenRefcountsPerStation(t *testing.T) {
 	t.Parallel()
 	m := sites()
 
-	listen(m, "KTLX")
-	listen(m, "KTLX")
-	if got := subscribedSites(m); len(got) != 1 || got[0] != "KTLX" {
+	listen(m, ktlx)
+	listen(m, ktlx)
+	if got := subscribedSites(m); len(got) != 1 || got[0] != ktlx {
 		t.Fatalf("two listens should name the site once, got %v", got)
 	}
 
-	unlisten(m, "KTLX")
+	unlisten(m, ktlx)
 	if got := subscribedSites(m); len(got) != 1 {
 		t.Fatalf("one of two listeners left, site should still be subscribed, got %v", got)
 	}
 
-	unlisten(m, "KTLX")
+	unlisten(m, ktlx)
 	if got := subscribedSites(m); len(got) != 0 {
 		t.Fatalf("last listener gone, site should be unsubscribed, got %v", got)
 	}
-	if _, ok := m.Load("KTLX"); ok {
+	if _, ok := m.Load(ktlx); ok {
 		t.Fatal("last listener gone, entry should be deleted rather than left at zero")
 	}
 }
@@ -43,9 +45,9 @@ func TestUnlistenUnknownStationDoesNotUnderflow(t *testing.T) {
 	t.Parallel()
 	m := sites()
 
-	unlisten(m, "KTLX")
+	unlisten(m, ktlx)
 
-	if v, ok := m.Load("KTLX"); ok {
+	if v, ok := m.Load(ktlx); ok {
 		t.Fatalf("unlisten of an absent station left an entry: %d", v)
 	}
 	if got := subscribedSites(m); len(got) != 0 {
@@ -54,7 +56,7 @@ func TestUnlistenUnknownStationDoesNotUnderflow(t *testing.T) {
 
 	// And the entry it used to leave behind must not resurrect the site on a
 	// later decrement either.
-	unlisten(m, "KTLX")
+	unlisten(m, ktlx)
 	if got := subscribedSites(m); len(got) != 0 {
 		t.Fatalf("second unlisten subscribed the station: %v", got)
 	}
@@ -63,13 +65,13 @@ func TestUnlistenUnknownStationDoesNotUnderflow(t *testing.T) {
 func TestSubscribedSitesIsSortedAndSkipsZero(t *testing.T) {
 	t.Parallel()
 	m := sites()
-	listen(m, "KTLX")
+	listen(m, ktlx)
 	listen(m, "KABC")
 	listen(m, "KOUN")
 	m.Store("KZZZ", 0)
 
 	got := subscribedSites(m)
-	want := []string{"KABC", "KOUN", "KTLX"}
+	want := []string{"KABC", "KOUN", ktlx}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -88,8 +90,8 @@ func TestChunkFilterPolicy(t *testing.T) {
 		want  string
 	}{
 		{"no sites matches nothing", nil, `{"SiteID": ["nonsense"]}`},
-		{"one site", []string{"KTLX"}, `{"SiteID": ["KTLX"]}`},
-		{"many sites", []string{"KABC", "KTLX"}, `{"SiteID": ["KABC","KTLX"]}`},
+		{"one site", []string{ktlx}, `{"SiteID": ["KTLX"]}`},
+		{"many sites", []string{"KABC", ktlx}, `{"SiteID": ["KABC","KTLX"]}`},
 	} {
 		got, err := chunkFilterPolicy(tc.sites)
 		if err != nil {
@@ -108,7 +110,7 @@ func TestArchiveFilterPolicy(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 7, 23, 42, 0, 0, time.UTC)
 
-	got, dropped, err := archiveFilterPolicy([]string{"KTLX"}, now)
+	got, dropped, err := archiveFilterPolicy([]string{ktlx}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +138,7 @@ func TestArchiveFilterPolicy(t *testing.T) {
 func TestArchiveFilterPolicyStraddlesTheDateRoll(t *testing.T) {
 	t.Parallel()
 	got, _, err := archiveFilterPolicy(
-		[]string{"KTLX"}, time.Date(2026, 12, 31, 23, 59, 0, 0, time.UTC))
+		[]string{ktlx}, time.Date(2026, 12, 31, 23, 59, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +157,7 @@ func TestArchiveFilterPolicyStraddlesTheDateRoll(t *testing.T) {
 func TestArchiveFilterPolicyKeepsYesterdayJustAfterMidnight(t *testing.T) {
 	t.Parallel()
 	got, _, err := archiveFilterPolicy(
-		[]string{"KTLX"}, time.Date(2027, 1, 1, 0, 5, 0, 0, time.UTC))
+		[]string{ktlx}, time.Date(2027, 1, 1, 0, 5, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
