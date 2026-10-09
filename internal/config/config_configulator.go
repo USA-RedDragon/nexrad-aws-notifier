@@ -288,7 +288,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.StringSlice(names[3], nil, "IP addresses or CIDR ranges of reverse proxies trusted to set the X-Forwarded-For header")
 	fs.StringSlice(names[4], nil, "Origins allowed to open a websocket. An entry may be a bare host (example.com, matching any port), a host:port (example.com:8080) or a full URL (https://example.com). * allows any origin")
 	fs.Bool(names[5], false, "Enable OpenTelemetry tracing")
-	fs.String(names[6], "", "The OpenTelemetry collector endpoint")
+	fs.String(names[6], "", "The OpenTelemetry collector OTLP gRPC endpoint as host:port. Required when tracing is enabled")
 	fs.Bool(names[7], false, "Enable Go pprof")
 	fs.Bool(names[8], false, "Enable the Prometheus metrics server")
 	fs.String(names[9], "127.0.0.1", "The IPv4 address to bind the Prometheus metrics server to. 127.0.0.1 is localhost")

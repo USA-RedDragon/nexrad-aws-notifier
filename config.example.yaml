@@ -15,7 +15,7 @@ http:
   tracing:
     # Enable OpenTelemetry tracing
     enabled: false
-    # The OpenTelemetry collector endpoint
+    # The OpenTelemetry collector OTLP gRPC endpoint as host:port. Required when tracing is enabled
     # otlp_endpoint: ""
   # Go pprof configuration
   pprof:

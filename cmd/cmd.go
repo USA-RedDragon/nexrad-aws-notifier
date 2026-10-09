@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,8 +46,24 @@ func newCommand(version, commit string, newListener listenerFactory) *cobra.Comm
 	return cmd
 }
 
+// tracingShutdownTimeout bounds the final span flush on exit.
+const tracingShutdownTimeout = 5 * time.Second
+
 func run(cmd *cobra.Command, config *config.Config, newListener listenerFactory) error {
 	slog.Info("nexrad-aws-notifier", "version", cmd.Annotations["version"], "commit", cmd.Annotations["commit"])
+
+	shutdownTracing, err := setupTracing(cmd.Context(), config, cmd.Annotations["version"])
+	if err != nil {
+		return fmt.Errorf("failed to set up tracing: %w", err)
+	}
+	stopTracing := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), tracingShutdownTimeout)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			return fmt.Errorf("failed to shut down tracing: %w", err)
+		}
+		return nil
+	}
 
 	// Initialize the websocket event bus
 	eventBus := events.NewEventBus()
@@ -55,7 +72,7 @@ func run(cmd *cobra.Command, config *config.Config, newListener listenerFactory)
 	eventChannel := eventBus.GetChannel()
 	sqsListener, err := newListener(eventChannel)
 	if err != nil {
-		return fmt.Errorf("failed to create SQS listener: %w", err)
+		return errors.Join(fmt.Errorf("failed to create SQS listener: %w", err), stopTracing())
 	}
 	slog.Info("SQS listener started")
 
@@ -76,7 +93,8 @@ func run(cmd *cobra.Command, config *config.Config, newListener listenerFactory)
 		err := errGrp.Wait()
 		// We always want to close the event channel before exiting
 		close(eventChannel)
-		return err
+		// Last, so spans from the shutdown itself are flushed too.
+		return errors.Join(err, stopTracing())
 	}
 
 	err = server.Start(cmd.Context())

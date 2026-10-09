@@ -1,5 +1,7 @@
 package config
 
+import "errors"
+
 //go:generate go tool configulator -type Config
 
 type Config struct {
@@ -8,7 +10,7 @@ type Config struct {
 
 type Tracing struct {
 	Enabled      bool   `name:"enabled" description:"Enable OpenTelemetry tracing"`
-	OTLPEndpoint string `name:"otlp_endpoint" description:"The OpenTelemetry collector endpoint"`
+	OTLPEndpoint string `name:"otlp_endpoint" description:"The OpenTelemetry collector OTLP gRPC endpoint as host:port. Required when tracing is enabled"`
 }
 
 type PProf struct {
@@ -33,6 +35,13 @@ type HTTP struct {
 	Metrics        Metrics  `name:"metrics" description:"Prometheus metrics configuration"`
 }
 
+// ErrOTLPEndpointRequired is returned by Validate when tracing is enabled with
+// nowhere to send the spans.
+var ErrOTLPEndpointRequired = errors.New("http.tracing.otlp_endpoint is required when tracing is enabled")
+
 func (c Config) Validate() error {
+	if c.HTTP.Tracing.Enabled && c.HTTP.Tracing.OTLPEndpoint == "" {
+		return ErrOTLPEndpointRequired
+	}
 	return nil
 }
