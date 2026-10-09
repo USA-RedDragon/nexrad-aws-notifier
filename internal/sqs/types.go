@@ -1,5 +1,7 @@
 package sqs
 
+import "encoding/json"
+
 type ArchiveNotification struct {
 	Type             string `json:"Type"`
 	MessageID        string `json:"MessageId"`
@@ -53,13 +55,15 @@ type ChunkNotification struct {
 	}
 }
 
+// ChunkNotificationMessage is the body of a chunk notification. VolumeID and
+// ChunkID arrive as JSON numbers here, unlike in the message attributes.
 type ChunkNotificationMessage struct {
-	S3Bucket  string `json:"S3Bucket"`
-	Key       string `json:"Key"`
-	SiteID    string `json:"SiteID"`
-	DateTime  string `json:"DateTime"`
-	VolumeID  string `json:"VolumeID"`
-	ChunkID   string `json:"ChunkID"`
-	ChunkType string `json:"ChunkType"`
-	L2Version string `json:"L2Version"`
+	S3Bucket  string      `json:"S3Bucket"`
+	Key       string      `json:"Key"`
+	SiteID    string      `json:"SiteID"`
+	DateTime  string      `json:"DateTime"`
+	VolumeID  json.Number `json:"VolumeID"`
+	ChunkID   json.Number `json:"ChunkID"`
+	ChunkType string      `json:"ChunkType"`
+	L2Version string      `json:"L2Version"`
 }
