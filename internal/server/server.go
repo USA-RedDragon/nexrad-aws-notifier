@@ -67,7 +67,7 @@ func NewServer(config *config.HTTP, eventsChannel chan events.Event, sqsListener
 		metricsIPV6Server = &http.Server{
 			Addr:              fmt.Sprintf("[%s]:%d", config.Metrics.IPV6Host, config.Metrics.Port),
 			ReadHeaderTimeout: defTimeout,
-			WriteTimeout:      defTimeout,
+			WriteTimeout:      writeTimeout,
 			Handler:           metricsRouter,
 		}
 	}
@@ -82,7 +82,7 @@ func NewServer(config *config.HTTP, eventsChannel chan events.Event, sqsListener
 		ipv6Server: &http.Server{
 			Addr:              fmt.Sprintf("[%s]:%d", config.IPV6Host, config.Port),
 			ReadHeaderTimeout: defTimeout,
-			WriteTimeout:      defTimeout,
+			WriteTimeout:      writeTimeout,
 			Handler:           r,
 		},
 		metricsIPV4Server: metricsIPV4Server,
