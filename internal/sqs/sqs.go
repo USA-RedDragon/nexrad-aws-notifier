@@ -88,6 +88,11 @@ type Listener struct {
 	// shutdown open for its full duration.
 	cancel  context.CancelFunc
 	running atomic.Bool
+	// Closed by cancel. Unblocks handlers waiting to hand an event on.
+	done <-chan struct{}
+	// The poll loops and the message handlers they start. Stop waits for
+	// them, since the caller closes eventChan once it returns.
+	workers sync.WaitGroup
 }
 
 // ensureQueue finds or creates one queue, returning its URL.
@@ -420,6 +425,7 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 		chunkQueueName:   fmt.Sprintf("nexrad-aws-notifier-events-chunk-%s", chunkQueueUUID.String()),
 		cancel:           cancel,
 		running:          atomic.Bool{},
+		done:             pollCtx.Done(),
 	}
 	listener.running.Store(true)
 
@@ -448,6 +454,7 @@ func NewListener(eventChan chan events.Event) (*Listener, error) {
 	}
 
 	go listener.refreshArchiveFilter(pollCtx)
+	listener.workers.Add(2)
 	go listener.poll(pollCtx, "archive", listener.archiveQueueURL, listener.onArchiveMessage)
 	go listener.poll(pollCtx, "chunk", listener.chunkQueueURL, listener.onChunkMessage)
 
@@ -543,6 +550,7 @@ func wait(ctx context.Context, d time.Duration) bool {
 // poll drains one queue until the listener stops. Both feeds have identical
 // mechanics; only the queue and the per-message handler differ.
 func (l *Listener) poll(ctx context.Context, name string, queueURL string, onMessage func(types.Message)) {
+	defer l.workers.Done()
 	failures := 0
 	for l.running.Load() {
 		resp, err := l.awsSqs.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
@@ -570,8 +578,25 @@ func (l *Listener) poll(ctx context.Context, name string, queueURL string, onMes
 		}
 		l.deleteMessages(ctx, name, queueURL, resp.Messages)
 		for _, msg := range resp.Messages {
-			go onMessage(msg)
+			l.dispatch(onMessage, msg)
 		}
+	}
+}
+
+// dispatch handles one message on its own goroutine, which Stop waits for.
+func (l *Listener) dispatch(onMessage func(types.Message), msg types.Message) {
+	l.workers.Add(1)
+	go func() {
+		defer l.workers.Done()
+		onMessage(msg)
+	}()
+}
+
+// emit hands an event on, or drops it once the listener is stopping.
+func (l *Listener) emit(event events.Event) {
+	select {
+	case l.eventChan <- event:
+	case <-l.done:
 	}
 }
 
@@ -622,12 +647,10 @@ func (l *Listener) onArchiveMessage(msg types.Message) {
 		station := parts[3]
 		slog.Info("Received archive record", "station", station, "prefix", record.S3.Object.Key)
 
-		if l.running.Load() {
-			l.eventChan <- events.NexradArchiveEvent{
-				Station: station,
-				Path:    record.S3.Object.Key,
-			}
-		}
+		l.emit(events.NexradArchiveEvent{
+			Station: station,
+			Path:    record.S3.Object.Key,
+		})
 	}
 }
 
@@ -659,17 +682,15 @@ func (l *Listener) onChunkMessage(msg types.Message) {
 
 	slog.Info("Received chunk record", "site", site, "volume", volume, "chunk", chunk, "chunkType", chunkType, "l2Version", l2Version, "path", message.Key)
 
-	if l.running.Load() {
-		l.eventChan <- events.NexradChunkEvent{
-			Station:   site,
-			Volume:    volume,
-			Chunk:     chunk,
-			ChunkType: chunkType,
-			L2Version: l2Version,
-			Name:      name,
-			Path:      message.Key,
-		}
-	}
+	l.emit(events.NexradChunkEvent{
+		Station:   site,
+		Volume:    volume,
+		Chunk:     chunk,
+		ChunkType: chunkType,
+		L2Version: l2Version,
+		Name:      name,
+		Path:      message.Key,
+	})
 }
 
 func (l *Listener) Stop() error {
@@ -677,6 +698,7 @@ func (l *Listener) Stop() error {
 	// Cancels the in-flight long poll, which would otherwise hold shutdown open
 	// for the rest of its 20 seconds.
 	l.cancel()
+	l.workers.Wait()
 
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
