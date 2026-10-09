@@ -147,6 +147,25 @@ func TestArchiveFilterPolicyStraddlesTheDateRoll(t *testing.T) {
 	}
 }
 
+// A key is dated by the volume's start, and the volume is filed minutes after
+// it ends. Just past midnight the volume begun before it is still on its way,
+// so a policy written then has to keep naming the day that just ended, or the
+// last volume of every day is lost whenever a refresh or a connect lands in
+// that gap.
+func TestArchiveFilterPolicyKeepsYesterdayJustAfterMidnight(t *testing.T) {
+	t.Parallel()
+	got, _, err := archiveFilterPolicy(
+		[]string{"KTLX"}, time.Date(2027, 1, 1, 0, 5, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, date := range []string{"2026/12/31/KTLX/", "2027/01/01/KTLX/"} {
+		if !strings.Contains(got, date) {
+			t.Errorf("policy should name %s, got %s", date, got)
+		}
+	}
+}
+
 // The defect this replaced: `*/SITE/*` is two wildcards, SNS scores wildcard
 // complexity across the whole policy, and it refused the write from the fifth
 // site on -- which failed the websocket connect that triggered it.

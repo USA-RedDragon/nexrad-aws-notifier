@@ -59,6 +59,11 @@ const (
 	// stale on its own; this also retries one a transient SNS failure left
 	// behind.
 	archiveFilterRefresh = 15 * time.Minute
+
+	// How long after its start an archive volume may still be filed. Its key
+	// carries the start date, so for this long after midnight the day that
+	// just ended is still live.
+	archiveFilingLag = time.Hour
 )
 
 type Listener struct {
@@ -194,8 +199,9 @@ func chunkFilterPolicy(sites []string) (string, error) {
 // SetSubscriptionAttributes, and so the websocket connect that triggered it.
 //
 // Prefixes carry no such budget, so the date is spelled out instead. Two days
-// are named -- the current UTC day and the next -- so a volume filed either
-// side of the roll matches without waiting for the next refresh.
+// are named so a volume filed either side of the roll matches without waiting
+// for the next refresh: the current UTC day and the next, or, within
+// archiveFilingLag of midnight, the day that just ended and the current one.
 //
 // Returns the number of sites that would not fit, so the caller can say so.
 func archiveFilterPolicy(sites []string, now time.Time) (string, int, error) {
@@ -216,10 +222,14 @@ func archiveFilterPolicy(sites []string, now time.Time) (string, int, error) {
 		sites = sites[:maxArchiveFilterValues]
 	}
 
+	first := now.UTC()
+	if days > 1 && first.Add(-archiveFilingLag).Day() != first.Day() {
+		first = first.AddDate(0, 0, -1)
+	}
 	prefixes := make([]map[string]string, 0, len(sites)*days)
 	for _, site := range sites {
 		for day := range days {
-			date := now.UTC().AddDate(0, 0, day).Format("2006/01/02")
+			date := first.AddDate(0, 0, day).Format("2006/01/02")
 			prefixes = append(prefixes, map[string]string{"prefix": date + "/" + site + "/"})
 		}
 	}
