@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,6 +18,12 @@ import (
 )
 
 func NewCommand(version, commit string) *cobra.Command {
+	return newCommand(version, commit, sqs.NewListener)
+}
+
+type listenerFactory func(chan events.Event) (*sqs.Listener, error)
+
+func newCommand(version, commit string, newListener listenerFactory) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "nexrad-aws-notifier",
 		Version: fmt.Sprintf("%s - %s", version, commit),
@@ -33,12 +40,12 @@ func NewCommand(version, commit string) *cobra.Command {
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
-		return run(cmd, cfg)
+		return run(cmd, cfg, newListener)
 	}
 	return cmd
 }
 
-func run(cmd *cobra.Command, config *config.Config) error {
+func run(cmd *cobra.Command, config *config.Config, newListener listenerFactory) error {
 	slog.Info("nexrad-aws-notifier", "version", cmd.Annotations["version"], "commit", cmd.Annotations["commit"])
 
 	// Initialize the websocket event bus
@@ -46,7 +53,7 @@ func run(cmd *cobra.Command, config *config.Config) error {
 	slog.Info("Event bus started")
 
 	eventChannel := eventBus.GetChannel()
-	sqsListener, err := sqs.NewListener(eventChannel)
+	sqsListener, err := newListener(eventChannel)
 	if err != nil {
 		return fmt.Errorf("failed to create SQS listener: %w", err)
 	}
@@ -54,14 +61,8 @@ func run(cmd *cobra.Command, config *config.Config) error {
 
 	slog.Info("Starting HTTP server")
 	server := server.NewServer(&config.HTTP, eventChannel, sqsListener)
-	err = server.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start HTTP server: %w", err)
-	}
 
-	stop := func(sig os.Signal) {
-		slog.Info("Shutting down")
-
+	teardown := func() error {
 		errGrp := errgroup.Group{}
 
 		errGrp.Go(func() error {
@@ -75,6 +76,18 @@ func run(cmd *cobra.Command, config *config.Config) error {
 		err := errGrp.Wait()
 		// We always want to close the event channel before exiting
 		close(eventChannel)
+		return err
+	}
+
+	err = server.Start()
+	if err != nil {
+		return errors.Join(fmt.Errorf("failed to start HTTP server: %w", err), teardown())
+	}
+
+	stop := func(sig os.Signal) {
+		slog.Info("Shutting down")
+
+		err := teardown()
 		if err != nil {
 			slog.Error("Shutdown error", "error", err.Error())
 			os.Exit(1)
