@@ -12,36 +12,36 @@ import (
 )
 
 type Config struct {
-	HTTP HTTP `json:"http"`
+	HTTP HTTP `json:"http" yaml:"http"`
 }
 
 type HTTPListener struct {
-	IPV4Host string `json:"ipv4_host"`
-	IPV6Host string `json:"ipv6_host"`
-	Port     uint16 `json:"port"`
+	IPV4Host string `json:"ipv4_host" yaml:"ipv4_host"`
+	IPV6Host string `json:"ipv6_host" yaml:"ipv6_host"`
+	Port     uint16 `json:"port" yaml:"port"`
 }
 
 type Tracing struct {
-	Enabled      bool   `json:"enabled"`
-	OTLPEndpoint string `json:"otlp_endpoint"`
+	Enabled      bool   `json:"enabled" yaml:"enabled"`
+	OTLPEndpoint string `json:"otlp_endpoint" yaml:"otlp_endpoint"`
 }
 
 type PProf struct {
-	Enabled bool `json:"enabled"`
+	Enabled bool `json:"enabled" yaml:"enabled"`
 }
 
 type Metrics struct {
-	HTTPListener
-	Enabled bool `json:"enabled"`
+	HTTPListener `yaml:",inline"`
+	Enabled      bool `json:"enabled" yaml:"enabled"`
 }
 
 type HTTP struct {
-	HTTPListener
-	Tracing
-	PProf          PProf    `json:"pprof"`
-	TrustedProxies []string `json:"trusted_proxies"`
-	Metrics        Metrics  `json:"metrics"`
-	CORSHosts      []string `json:"cors_hosts"`
+	HTTPListener   `yaml:",inline"`
+	Tracing        `yaml:"tracing"`
+	PProf          PProf    `json:"pprof" yaml:"pprof"`
+	TrustedProxies []string `json:"trusted_proxies" yaml:"trusted_proxies"`
+	Metrics        Metrics  `json:"metrics" yaml:"metrics"`
+	CORSHosts      []string `json:"cors_hosts" yaml:"cors_hosts"`
 }
 
 //nolint:golint,gochecknoglobals
