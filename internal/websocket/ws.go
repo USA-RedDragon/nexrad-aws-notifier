@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/config"
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
+	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/nexrad"
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/sqs"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -22,7 +24,44 @@ const (
 	writeWait = 5 * time.Second
 	// teardownTimeout bounds the SQS unsubscribe performed on disconnect.
 	teardownTimeout = 10 * time.Second
+	// maxSubscriptionsPerClient caps the websockets one client IP may hold
+	// open, each of which is one station. It leaves room for a few stations'
+	// chunks and archives at once.
+	maxSubscriptionsPerClient = 10
 )
+
+// clientLimiter counts open subscriptions per client.
+type clientLimiter struct {
+	limit  int
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newClientLimiter(limit int) *clientLimiter {
+	return &clientLimiter{limit: limit, counts: make(map[string]int)}
+}
+
+// acquire takes a slot for client, or reports false if it has none left.
+func (l *clientLimiter) acquire(client string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[client] >= l.limit {
+		return false
+	}
+	l.counts[client]++
+	return true
+}
+
+// release returns a slot taken by acquire.
+func (l *clientLimiter) release(client string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[client] <= 1 {
+		delete(l.counts, client)
+		return
+	}
+	l.counts[client]--
+}
 
 type Websocket interface {
 	OnMessage(ctx context.Context, r *http.Request, w Writer, msg []byte, t int)
@@ -88,7 +127,14 @@ func OriginAllowed(origin string, corsHosts []string) bool {
 	return false
 }
 
+// CreateHandler serves /ws/events/:type/:station. A request for an unknown
+// type or station is refused with 400, and one from a client already holding
+// maxSubscriptionsPerClient websockets with 429, before anything is subscribed.
 func CreateHandler(newHandler func() Websocket, config *config.HTTP) func(*gin.Context) {
+	return createHandler(newHandler, config, newClientLimiter(maxSubscriptionsPerClient))
+}
+
+func createHandler(newHandler func() Websocket, config *config.HTTP, limiter *clientLimiter) func(*gin.Context) {
 	handler := &WSHandler{
 		wsUpgrader: websocket.Upgrader{
 			HandshakeTimeout: 0,
@@ -123,11 +169,27 @@ func CreateHandler(newHandler func() Websocket, config *config.HTTP) func(*gin.C
 		// Validate before upgrading so a bad request gets a real HTTP status
 		// rather than a websocket that closes immediately.
 		messageType := events.EventType(c.Param("type"))
-		station := c.Param("station")
-		if messageType == "" || station == "" {
-			c.String(http.StatusBadRequest, "type and station are required")
+		switch messageType {
+		case events.EventTypeNexradChunk, events.EventTypeNexradArchive:
+		default:
+			c.String(http.StatusBadRequest, "unknown event type %q: expected %s or %s",
+				messageType, events.EventTypeNexradChunk, events.EventTypeNexradArchive)
 			return
 		}
+		station, err := nexrad.Station(c.Param("station"))
+		if err != nil {
+			c.String(http.StatusBadRequest, "%s", err)
+			return
+		}
+
+		client := c.ClientIP()
+		if !limiter.acquire(client) {
+			c.String(http.StatusTooManyRequests, "too many subscriptions from this client: at most %d websockets may be open at once",
+				maxSubscriptionsPerClient)
+			return
+		}
+		defer limiter.release(client)
+
 		sqsListener, ok := c.MustGet("sqsListener").(*sqs.Listener)
 		if !ok {
 			slog.Error("Failed to get sqsListener")

@@ -1,10 +1,13 @@
 package websocket
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
+	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/nexrad"
+	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/sqs"
 )
 
 const kfcx = "KFCX"
@@ -125,5 +128,26 @@ func TestRemoveStopsDelivery(t *testing.T) {
 
 	if _, ok := received(t, sub); ok {
 		t.Error("removed subscriber still received an event")
+	}
+}
+
+// The handler validates before upgrading, but a refusal from the listener must
+// still close the connection rather than be logged as a policy hiccup, and
+// must not leave an Unlisten owed for a station that was never registered.
+func TestOnConnectRefusesUnknownStation(t *testing.T) {
+	t.Parallel()
+	hub := newTestHub()
+	for _, messageType := range []events.EventType{events.EventTypeNexradChunk, events.EventTypeNexradArchive} {
+		conn := &EventsWebsocket{hub: hub, events: make(chan events.Event, subscriberBuffer)}
+		err := conn.OnConnect(t.Context(), nil, nil, messageType, "nonsense", &sqs.Listener{})
+		if !errors.Is(err, nexrad.ErrUnknownStation) {
+			t.Errorf("%s: OnConnect = %v, want ErrUnknownStation", messageType, err)
+		}
+		if conn.subscribed {
+			t.Errorf("%s: refused connection is marked subscribed", messageType)
+		}
+	}
+	if len(hub.subscribers) != 0 {
+		t.Errorf("refused connections were added to the hub: %d", len(hub.subscribers))
 	}
 }

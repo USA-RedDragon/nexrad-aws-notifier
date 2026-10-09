@@ -37,7 +37,11 @@ This route is used to subscribe to radar data for a specific station. The `:type
 
 The `:type` parameter can be one of two values, `nexrad-chunk` or `nexrad-archive`), where `chunk` is the real-time radar data and `archive` is when new full scans are complete.
 
-The `:station` parameter _should_ be capitalized, but the service will uppercase it if it is not.
+The `:station` parameter must be a NEXRAD site ID: a WSR-88D such as `KTLX`, `PHKI` or `TJUA`, or a TDWR such as `TBOS`. It _should_ be capitalized, but the service will uppercase it if it is not. The accepted IDs are listed in [`internal/nexrad/stations.go`](internal/nexrad/stations.go). An unknown type or station gets a `400` naming the problem, before the websocket is opened.
+
+Each client IP may hold at most 10 websockets open at once, one per type and station. Past that, further connections get a `429` until one closes.
+
+The service narrows its SNS subscriptions to the stations in use. When more are in use than an SNS filter policy can name, 36 for archives and 150 for chunks, the filter is widened to station prefixes such as `KT`, so every station in use is still delivered and the rest are discarded inside the service.
 
 The events emitted by the websocket for `archive` data are JSON objects with the following structure:
 

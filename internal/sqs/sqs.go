@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
+	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/nexrad"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
@@ -54,6 +55,10 @@ const (
 	// against live SNS: 36 values accepted, 40 refused with "Filter policy is
 	// too complex".
 	maxArchiveFilterValues = 36
+
+	// Most values the chunk attribute filter may carry: SNS's 150 combination
+	// cap, which a single flat key gets all of.
+	maxChunkFilterValues = 150
 
 	// How often the archive policy is rewritten. It names dates, so it goes
 	// stale on its own; this also retries one a transient SNS failure left
@@ -179,17 +184,73 @@ func subscribedSites(m *xsync.MapOf[string, uint]) []string {
 	return sites
 }
 
+// sitePrefixes shortens every site to its first width characters and returns
+// the distinct results, sorted. A site no longer than width is returned whole,
+// marked complete so the caller can match it exactly.
+func sitePrefixes(sites []string, width int) []sitePrefix {
+	var prefixes []sitePrefix
+	for _, site := range sites {
+		p := sitePrefix{value: site, complete: true}
+		if len(site) > width {
+			p = sitePrefix{value: site[:width]}
+		}
+		if !slices.Contains(prefixes, p) {
+			prefixes = append(prefixes, p)
+		}
+	}
+	slices.SortFunc(prefixes, func(a, b sitePrefix) int { return strings.Compare(a.value, b.value) })
+	return prefixes
+}
+
+type sitePrefix struct {
+	value    string
+	complete bool
+}
+
 // chunkFilterPolicy filters the chunk topic on the SiteID message attribute it
 // publishes.
-func chunkFilterPolicy(sites []string) (string, error) {
+//
+// Sites are named exactly while they fit in maxChunkFilterValues. Past that
+// they are grouped by ever shorter prefixes until the groups fit, so the
+// policy over-matches rather than going over the limit, which SNS would
+// refuse, leaving the previous filter in place. The hub drops the extra
+// stations' events. Reports whether it had to group.
+func chunkFilterPolicy(sites []string) (string, bool, error) {
 	if len(sites) == 0 {
 		sites = []string{noSite}
 	}
-	jsonSites, err := json.Marshal(sites)
-	if err != nil {
-		return "", err
+	longest := 0
+	for _, site := range sites {
+		longest = max(longest, len(site))
 	}
-	return fmt.Sprintf(`{"SiteID": %s}`, jsonSites), nil
+
+	var prefixes []sitePrefix
+	for width := longest; width >= 0 && prefixes == nil; width-- {
+		if candidate := sitePrefixes(sites, width); len(candidate) <= maxChunkFilterValues {
+			prefixes = candidate
+		}
+	}
+
+	values := make([]any, 0, len(prefixes))
+	collapsed := false
+	for _, p := range prefixes {
+		switch {
+		case p.complete:
+			values = append(values, p.value)
+		case p.value == "":
+			values = append(values, map[string]bool{"exists": true})
+			collapsed = true
+		default:
+			values = append(values, map[string]string{"prefix": p.value})
+			collapsed = true
+		}
+	}
+
+	jsonSites, err := json.Marshal(values)
+	if err != nil {
+		return "", false, err
+	}
+	return fmt.Sprintf(`{"SiteID": %s}`, jsonSites), collapsed, nil
 }
 
 // archiveFilterPolicy filters the archive topic, which publishes raw S3 event
@@ -208,34 +269,50 @@ func chunkFilterPolicy(sites []string) (string, error) {
 // for the next refresh: the current UTC day and the next, or, within
 // archiveFilingLag of midnight, the day that just ended and the current one.
 //
-// Returns the number of sites that would not fit, so the caller can say so.
-func archiveFilterPolicy(sites []string, now time.Time) (string, int, error) {
+// Past maxArchiveFilterValues the sites are grouped by ever shorter prefixes
+// (`YYYY/MM/DD/KT`) until they fit, so every subscribed site stays matched and
+// the hub drops the neighbours that come along with it. Reports whether it had
+// to group.
+func archiveFilterPolicy(sites []string, now time.Time) (string, bool, error) {
 	if len(sites) == 0 {
 		sites = []string{noSite}
 	}
-
-	// Naming both days doubles the values, so give that up before giving up a
-	// site: a stale date costs latency until the next refresh, a dropped site
-	// costs every notification.
-	days := 2
-	if len(sites)*days > maxArchiveFilterValues {
-		days = 1
+	longest := 0
+	for _, site := range sites {
+		longest = max(longest, len(site))
 	}
-	dropped := 0
-	if len(sites) > maxArchiveFilterValues {
-		dropped = len(sites) - maxArchiveFilterValues
-		sites = sites[:maxArchiveFilterValues]
+
+	// Naming both days doubles the values, so give that up before naming a
+	// site less precisely: a stale date costs latency until the next refresh,
+	// a group costs a stream of messages the hub then throws away.
+	var prefixes []sitePrefix
+	days := 1
+	for width := longest; width >= 0 && prefixes == nil; width-- {
+		candidate := sitePrefixes(sites, width)
+		for _, d := range []int{2, 1} {
+			if len(candidate)*d <= maxArchiveFilterValues {
+				prefixes, days = candidate, d
+				break
+			}
+		}
 	}
 
 	first := now.UTC()
 	if days > 1 && first.Add(-archiveFilingLag).Day() != first.Day() {
 		first = first.AddDate(0, 0, -1)
 	}
-	prefixes := make([]map[string]string, 0, len(sites)*days)
-	for _, site := range sites {
+	keys := make([]map[string]string, 0, len(prefixes)*days)
+	collapsed := false
+	for _, p := range prefixes {
+		value := p.value
+		if p.complete {
+			value += "/"
+		} else {
+			collapsed = true
+		}
 		for day := range days {
 			date := first.AddDate(0, 0, day).Format("2006/01/02")
-			prefixes = append(prefixes, map[string]string{"prefix": date + "/" + site + "/"})
+			keys = append(keys, map[string]string{"prefix": date + "/" + value})
 		}
 	}
 
@@ -244,23 +321,27 @@ func archiveFilterPolicy(sites []string, now time.Time) (string, int, error) {
 	// sites fit; the archive bucket only ever gains objects.
 	policy := map[string]any{
 		"Records": map[string]any{
-			"s3": map[string]any{"object": map[string]any{"key": prefixes}},
+			"s3": map[string]any{"object": map[string]any{"key": keys}},
 		},
 	}
 	out, err := json.Marshal(policy)
 	if err != nil {
-		return "", 0, err
+		return "", false, err
 	}
-	return string(out), dropped, nil
+	return string(out), collapsed, nil
 }
 
 func (l *Listener) updateChunkFilterPolicy(ctx context.Context) error {
 	l.chunkFilterMu.Lock()
 	defer l.chunkFilterMu.Unlock()
 
-	policy, err := chunkFilterPolicy(subscribedSites(l.chunkSites))
+	policy, collapsed, err := chunkFilterPolicy(subscribedSites(l.chunkSites))
 	if err != nil {
 		return err
+	}
+	if collapsed {
+		slog.Info("Too many chunk sites to name individually; filtering by site prefix",
+			"limit", maxChunkFilterValues)
 	}
 	_, err = l.awsSns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
 		SubscriptionArn: aws.String(l.nexradChunkSubscriptionARN),
@@ -274,13 +355,13 @@ func (l *Listener) updateArchiveFilterPolicy(ctx context.Context) error {
 	l.archiveFilterMu.Lock()
 	defer l.archiveFilterMu.Unlock()
 
-	policy, dropped, err := archiveFilterPolicy(subscribedSites(l.archiveSites), time.Now())
+	policy, collapsed, err := archiveFilterPolicy(subscribedSites(l.archiveSites), time.Now())
 	if err != nil {
 		return err
 	}
-	if dropped > 0 {
-		slog.Warn("Too many archive sites to filter on; the rest will not be notified",
-			"dropped", dropped, "limit", maxArchiveFilterValues)
+	if collapsed {
+		slog.Info("Too many archive sites to name individually; filtering by site prefix",
+			"limit", maxArchiveFilterValues)
 	}
 	_, err = l.awsSns.SetSubscriptionAttributes(ctx, &sns.SetSubscriptionAttributesInput{
 		SubscriptionArn: aws.String(l.nexradArchiveSubscriptionARN),
@@ -329,7 +410,7 @@ func (l *Listener) ensureChunkSubscription(ctx context.Context) error {
 		return err
 	}
 
-	policy, err := chunkFilterPolicy(nil)
+	policy, _, err := chunkFilterPolicy(nil)
 	if err != nil {
 		return err
 	}
@@ -500,13 +581,25 @@ func unlisten(m *xsync.MapOf[string, uint], station string) {
 	})
 }
 
+// ListenChunk adds a station to the chunk filter. A station that is not a
+// NEXRAD site is refused with nexrad.ErrUnknownStation and never registered.
 func (l *Listener) ListenChunk(ctx context.Context, station string) error {
-	listen(l.chunkSites, strings.ToUpper(station))
+	site, err := nexrad.Station(station)
+	if err != nil {
+		return err
+	}
+	listen(l.chunkSites, site)
 	return l.updateChunkFilterPolicy(ctx)
 }
 
+// ListenArchive adds a station to the archive filter. A station that is not a
+// NEXRAD site is refused with nexrad.ErrUnknownStation and never registered.
 func (l *Listener) ListenArchive(ctx context.Context, station string) error {
-	listen(l.archiveSites, strings.ToUpper(station))
+	site, err := nexrad.Station(station)
+	if err != nil {
+		return err
+	}
+	listen(l.archiveSites, site)
 	return l.updateArchiveFilterPolicy(ctx)
 }
 

@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/events"
+	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/nexrad"
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/sqs"
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/websocket"
 	gorillaWebsocket "github.com/gorilla/websocket"
@@ -127,6 +129,9 @@ func (c *EventsWebsocket) OnConnect(ctx context.Context, _ *http.Request, w webs
 		subscribeErr = sqsListener.ListenArchive(ctx, station)
 	default:
 		return fmt.Errorf("unknown event type %q", messageType)
+	}
+	if errors.Is(subscribeErr, nexrad.ErrUnknownStation) {
+		return subscribeErr
 	}
 	// The station is registered by now whether or not the call that follows it
 	// succeeded, so an Unlisten is owed either way.

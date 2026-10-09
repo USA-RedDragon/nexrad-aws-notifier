@@ -1,11 +1,15 @@
 package sqs
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/nexrad"
 	"github.com/puzpuzpuz/xsync/v3"
 )
 
@@ -93,7 +97,7 @@ func TestChunkFilterPolicy(t *testing.T) {
 		{"one site", []string{ktlx}, `{"SiteID": ["KTLX"]}`},
 		{"many sites", []string{"KABC", ktlx}, `{"SiteID": ["KABC","KTLX"]}`},
 	} {
-		got, err := chunkFilterPolicy(tc.sites)
+		got, _, err := chunkFilterPolicy(tc.sites)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -110,12 +114,12 @@ func TestArchiveFilterPolicy(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 7, 23, 42, 0, 0, time.UTC)
 
-	got, dropped, err := archiveFilterPolicy([]string{ktlx}, now)
+	got, collapsed, err := archiveFilterPolicy([]string{ktlx}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dropped != 0 {
-		t.Fatalf("one site should fit, dropped %d", dropped)
+	if collapsed {
+		t.Fatal("one site should be named individually")
 	}
 	want := `{"Records":{"s3":{"object":{"key":[` +
 		`{"prefix":"2026/09/07/KTLX/"},{"prefix":"2026/09/08/KTLX/"}]}}}}`
@@ -189,7 +193,7 @@ func TestArchiveFilterPolicyUsesNoWildcards(t *testing.T) {
 }
 
 // A policy SNS will refuse is worse than a wide one: the write fails, so the
-// filter keeps whatever it had. Measured against live SNS -- 36 values
+// filter keeps whatever it had. Measured against live SNS: 36 values
 // accepted, 40 refused as "Filter policy is too complex".
 func TestArchiveFilterPolicyStaysInsideWhatSNSAccepts(t *testing.T) {
 	t.Parallel()
@@ -198,7 +202,7 @@ func TestArchiveFilterPolicyStaysInsideWhatSNSAccepts(t *testing.T) {
 		sites = append(sites, fmt.Sprintf("K%03d", i))
 	}
 	for _, n := range []int{1, 6, 17, 18, 19, 36, 37, 100, 200} {
-		policy, dropped, err := archiveFilterPolicy(sites[:n], time.Now())
+		policy, _, err := archiveFilterPolicy(sites[:n], time.Now())
 		if err != nil {
 			t.Fatalf("%d sites: %v", n, err)
 		}
@@ -207,12 +211,135 @@ func TestArchiveFilterPolicyStaysInsideWhatSNSAccepts(t *testing.T) {
 			t.Errorf("%d sites rendered %d values, over the %d SNS accepts",
 				n, values, maxArchiveFilterValues)
 		}
-		if n <= maxArchiveFilterValues && dropped != 0 {
-			t.Errorf("%d sites fit in %d values but %d were dropped", n, values, dropped)
+	}
+}
+
+func archivePrefixes(t *testing.T, policy string) []string {
+	t.Helper()
+	var parsed struct {
+		Records struct {
+			S3 struct {
+				Object struct {
+					Key []struct {
+						Prefix string `json:"prefix"`
+					} `json:"key"`
+				} `json:"object"`
+			} `json:"s3"`
+		} `json:"Records"`
+	}
+	if err := json.Unmarshal([]byte(policy), &parsed); err != nil {
+		t.Fatalf("policy is not the expected shape: %v\n%s", err, policy)
+	}
+	prefixes := make([]string, 0, len(parsed.Records.S3.Object.Key))
+	for _, k := range parsed.Records.S3.Object.Key {
+		prefixes = append(prefixes, k.Prefix)
+	}
+	return prefixes
+}
+
+// Past 36 values the sites at the end of the alphabet used to be cut from the
+// policy, so every Alaska, Hawaii, Puerto Rico and TDWR subscriber went silent
+// once enough stations were in use. Every subscribed site has to stay matched,
+// even if that means the filter lets neighbours through as well.
+func TestArchiveFilterPolicyMatchesEverySubscribedSite(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	all := nexrad.Stations()
+	for _, n := range []int{1, 18, 19, 36, 37, 60, 100, len(all)} {
+		subscribed := all[len(all)-n:]
+		policy, collapsed, err := archiveFilterPolicy(subscribed, now)
+		if err != nil {
+			t.Fatalf("%d sites: %v", n, err)
 		}
-		if n > maxArchiveFilterValues && dropped != n-maxArchiveFilterValues {
-			t.Errorf("%d sites: dropped %d, want %d", n, dropped, n-maxArchiveFilterValues)
+		prefixes := archivePrefixes(t, policy)
+		if len(prefixes) > maxArchiveFilterValues {
+			t.Errorf("%d sites rendered %d values, over the %d SNS accepts",
+				n, len(prefixes), maxArchiveFilterValues)
 		}
+		if collapsed != (n > maxArchiveFilterValues) {
+			t.Errorf("%d sites: collapsed = %v", n, collapsed)
+		}
+		for _, site := range subscribed {
+			key := now.Format("2006/01/02") + "/" + site + "/" + site + now.Format("20060102_150405") + "_V06"
+			if !slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(key, p) }) {
+				t.Errorf("%d sites: %s is not matched by %v", n, site, prefixes)
+			}
+		}
+	}
+}
+
+func chunkValues(t *testing.T, policy string) []any {
+	t.Helper()
+	var parsed struct {
+		SiteID []any `json:"SiteID"`
+	}
+	if err := json.Unmarshal([]byte(policy), &parsed); err != nil {
+		t.Fatalf("policy is not the expected shape: %v\n%s", err, policy)
+	}
+	return parsed.SiteID
+}
+
+func chunkMatches(values []any, site string) bool {
+	for _, v := range values {
+		switch v := v.(type) {
+		case string:
+			if v == site {
+				return true
+			}
+		case map[string]any:
+			if p, ok := v["prefix"].(string); ok && strings.HasPrefix(site, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The chunk policy had no ceiling at all. Past 150 sites the write failed and
+// the filter kept its old list, so stations subscribed after that never
+// received a chunk.
+func TestChunkFilterPolicyMatchesEverySubscribedSite(t *testing.T) {
+	t.Parallel()
+	all := nexrad.Stations()
+	for _, n := range []int{1, 150, 151, len(all)} {
+		subscribed := all[len(all)-n:]
+		policy, collapsed, err := chunkFilterPolicy(subscribed)
+		if err != nil {
+			t.Fatalf("%d sites: %v", n, err)
+		}
+		values := chunkValues(t, policy)
+		if len(values) > maxChunkFilterValues {
+			t.Errorf("%d sites rendered %d values, over the %d SNS accepts",
+				n, len(values), maxChunkFilterValues)
+		}
+		if collapsed != (n > maxChunkFilterValues) {
+			t.Errorf("%d sites: collapsed = %v", n, collapsed)
+		}
+		for _, site := range subscribed {
+			if !chunkMatches(values, site) {
+				t.Errorf("%d sites: %s is not matched by %s", n, site, policy)
+			}
+		}
+	}
+}
+
+// Junk from a websocket path used to go straight into the filter policies.
+func TestListenRejectsUnknownStations(t *testing.T) {
+	t.Parallel()
+	l := &Listener{archiveSites: sites(), chunkSites: sites()}
+	for _, station := range []string{"nonsense", "KZZZ", "", "KTLX/"} {
+		if err := l.ListenChunk(t.Context(), station); !errors.Is(err, nexrad.ErrUnknownStation) {
+			t.Errorf("ListenChunk(%q) = %v, want ErrUnknownStation", station, err)
+		}
+		if err := l.ListenArchive(t.Context(), station); !errors.Is(err, nexrad.ErrUnknownStation) {
+			t.Errorf("ListenArchive(%q) = %v, want ErrUnknownStation", station, err)
+		}
+	}
+	if got := subscribedSites(l.chunkSites); len(got) != 0 {
+		t.Errorf("rejected stations reached the chunk filter: %v", got)
+	}
+	if got := subscribedSites(l.archiveSites); len(got) != 0 {
+		t.Errorf("rejected stations reached the archive filter: %v", got)
 	}
 }
 
@@ -225,21 +352,21 @@ func TestArchiveFilterPolicyGivesUpTheSecondDayBeforeASite(t *testing.T) {
 		sites = append(sites, fmt.Sprintf("K%03d", i))
 	}
 	// 18 sites x 2 days = 36, exactly what fits.
-	policy, dropped, err := archiveFilterPolicy(sites[:18], time.Now())
+	policy, collapsed, err := archiveFilterPolicy(sites[:18], time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dropped != 0 || strings.Count(policy, `{"prefix":`) != 36 {
-		t.Errorf("18 sites should fit as 36 values, got %d values and %d dropped",
-			strings.Count(policy, `{"prefix":`), dropped)
+	if collapsed || strings.Count(policy, `{"prefix":`) != 36 {
+		t.Errorf("18 sites should fit as 36 values, got %d values, collapsed %v",
+			strings.Count(policy, `{"prefix":`), collapsed)
 	}
 	// 19 would be 38, so the second day goes rather than a site.
-	policy, dropped, err = archiveFilterPolicy(sites[:19], time.Now())
+	policy, collapsed, err = archiveFilterPolicy(sites[:19], time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dropped != 0 {
-		t.Errorf("19 sites should still all be named, dropped %d", dropped)
+	if collapsed {
+		t.Error("19 sites should still all be named individually")
 	}
 	if got := strings.Count(policy, `{"prefix":`); got != 19 {
 		t.Errorf("19 sites should fall back to one day each, got %d values", got)
