@@ -8,7 +8,7 @@ internal/server/middleware.go	21	12
 internal/server/routes.go	5	4
 internal/server/server.go	81	55
 internal/server/websocket/events.go	65	31
-internal/sqs/sqs.go	314	248
+internal/sqs/sqs.go	314	250
 internal/websocket/writer.go	5	0
 internal/websocket/ws.go	99	52
 main.go	4	0
