@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/nexrad-aws-notifier/internal/nexrad"
-	"github.com/puzpuzpuz/xsync/v3"
+	"github.com/puzpuzpuz/xsync/v4"
 )
 
 const ktlx = "KTLX"
